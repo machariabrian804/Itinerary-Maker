@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Safari Quote — Itinerary Price Maker</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app" id="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 40 40" fill="none">
+            <circle cx="20" cy="16" r="7" fill="currentColor" opacity=".92"/>
+            <path d="M3 27c5.5-5 10.5-5 16 0s10.5 5 18 0" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+            <path d="M3 33c5.5-5 10.5-5 16 0s10.5 5 18 0" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" opacity=".55"/>
+          </svg>
+        </div>
+        <div class="brand-copy">
+          <strong>Safari Quote</strong>
+          <span>Itinerary price maker</span>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="Main navigation">
+        <button class="nav-item is-active" data-view="quote">
+          <span class="nav-icon" aria-hidden="true">◇</span>
+          <span>Quote builder</span>
+        </button>
+        <button class="nav-item" data-view="rates">
+          <span class="nav-icon" aria-hidden="true">▤</span>
+          <span>Rate library</span>
+          <span class="nav-count" id="navRateCount">—</span>
+        </button>
+        <button class="nav-item" data-view="settings">
+          <span class="nav-icon" aria-hidden="true">⚙</span>
+          <span>Settings</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="sync-state">
+          <span class="status-dot" id="syncDot"></span>
+          <span id="syncStatus">Connecting…</span>
+        </div>
+        <button class="btn btn-sidebar" id="syncBtn" type="button">Sync OneDrive</button>
+        <a class="sidebar-link" id="contractLink" href="https://1drv.ms/f/c/c6bd9a516690d040/IgCQLxHViUcZQrIw6ovUwuDUAS7stpyD4G113ctodZqgiKs?e=P9ao7Y" target="_blank" rel="noopener">Open contract folder ↗</a>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="quote-switcher">
+          <label class="sr-only" for="quoteSelect">Active quote</label>
+          <select id="quoteSelect" class="quote-select"></select>
+          <button class="icon-btn" id="newQuoteBtn" type="button" title="New quote" aria-label="New quote">+</button>
+          <button class="icon-btn" id="duplicateQuoteBtn" type="button" title="Duplicate quote" aria-label="Duplicate quote">⧉</button>
+          <button class="icon-btn danger-hover" id="deleteQuoteBtn" type="button" title="Delete quote" aria-label="Delete quote">✕</button>
+        </div>
+        <div class="top-actions">
+          <span class="save-indicator" id="saveIndicator">Saved</span>
+          <button class="btn btn-quiet" id="importBtn" type="button">Import CSV</button>
+          <button class="btn btn-quiet" id="exportBtn" type="button">Export CSV</button>
+          <button class="btn btn-primary" id="printBtn" type="button">Print / PDF</button>
+        </div>
+      </header>
+
+      <div class="offline-banner hidden" id="offlineBanner">
+        <strong>Local server offline.</strong>
+        <span>Quotes and printing still work. Start <code>python3 server.py</code> to sync contracts and extract rates.</span>
+      </div>
+
+      <section class="view" id="view-quote">
+        <div class="quote-layout">
+          <div class="quote-main">
+            <section class="panel quote-head">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Quote details</p>
+                  <h1>Build the itinerary</h1>
+                </div>
+                <label class="markup-control" for="markupInput">
+                  <span>Markup</span>
+                  <span class="input-suffix">
+                    <input id="markupInput" type="number" min="0" max="100" step="0.5" inputmode="decimal">
+                    <span>%</span>
+                  </span>
+                </label>
+              </div>
+
+              <div class="form-grid">
+                <label class="field span-2">
+                  <span>Quote name</span>
+                  <input id="quoteName" type="text" placeholder="e.g. Mara & Amboseli — 7 nights">
+                </label>
+                <label class="field">
+                  <span>Client</span>
+                  <input id="clientName" type="text" placeholder="Client name">
+                </label>
+                <label class="field">
+                  <span>Destination</span>
+                  <input id="destination" type="text" placeholder="Kenya">
+                </label>
+                <label class="field">
+                  <span>Start date</span>
+                  <input id="startDate" type="date">
+                </label>
+                <label class="field">
+                  <span>End date</span>
+                  <input id="endDate" type="date">
+                </label>
+                <label class="field">
+                  <span>Adults</span>
+                  <input id="adults" type="number" min="0" step="1" inputmode="numeric">
+                </label>
+                <label class="field">
+                  <span>Children</span>
+                  <input id="children" type="number" min="0" step="1" inputmode="numeric">
+                </label>
+                <label class="field">
+                  <span>Quote currency</span>
+                  <select id="quoteCurrency">
+                    <option value="USD">USD — US dollar</option>
+                    <option value="KES">KES — Kenyan shilling</option>
+                    <option value="EUR">EUR — Euro</option>
+                    <option value="GBP">GBP — Pound sterling</option>
+                  </select>
+                </label>
+              </div>
+            </section>
+
+            <section class="panel planner-panel" id="plannerPanel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Trip planner</p>
+                  <h2>Where are you going?</h2>
+                </div>
+                <div class="planner-summary">
+                  <span class="planner-pill"><strong id="plannerDays">1</strong> day<span id="plannerDaysPlural">s</span></span>
+                  <span class="planner-pill"><strong id="plannerNights">1</strong> night<span id="plannerNightsPlural">s</span></span>
+                </div>
+              </div>
+
+              <div class="form-grid planner-grid">
+                <label class="field">
+                  <span>Number of days</span>
+                  <input id="tripDays" type="number" min="1" step="1" inputmode="numeric">
+                </label>
+                <label class="field">
+                  <span>Guest type</span>
+                  <select id="residency">
+                    <option value="non-resident">Non-resident</option>
+                    <option value="resident">Resident</option>
+                  </select>
+                </label>
+                <div class="field span-2 planner-hint">
+                  <span>How it works</span>
+                  <p>Add each location and how many nights you’ll stay. We’ll suggest hotels/contracts from the OneDrive library for that location and guest type.</p>
+                </div>
+              </div>
+
+              <div class="stops-head">
+                <span class="stops-label">Stops</span>
+                <button class="btn btn-quiet btn-small" id="addStopBtn" type="button">Add stop</button>
+              </div>
+              <div class="stops-list" id="stopsList"></div>
+
+              <div class="hotel-matches" id="hotelMatches">
+                <div class="hotel-matches-head">
+                  <div>
+                    <span class="stops-label">Hotels &amp; contracts</span>
+                    <p class="muted small" id="hotelMatchesHint">Select a location to see matching hotels.</p>
+                  </div>
+                </div>
+                <div class="hotel-match-list" id="hotelMatchList"></div>
+              </div>
+            </section>
+
+            <section class="panel lines-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Itinerary</p>
+                  <h2>Services &amp; rates</h2>
+                </div>
+                <div class="line-actions">
+                  <button class="btn btn-quiet" id="addManualLineBtn" type="button">Add line</button>
+                  <button class="btn btn-primary" id="browseRatesBtn" type="button">Add from rates</button>
+                </div>
+              </div>
+
+              <div class="empty-state" id="linesEmpty">
+                <div class="empty-mark" aria-hidden="true">◇</div>
+                <h3>Start with a contract rate</h3>
+                <p>Pick a supplier and contract from the rate library, or add a line manually. Your 10% markup is applied automatically.</p>
+                <div class="empty-actions">
+                  <button class="btn btn-primary" id="emptyBrowseBtn" type="button">Browse rate library</button>
+                  <button class="btn btn-quiet" id="emptyManualBtn" type="button">Add a line</button>
+                </div>
+              </div>
+
+              <div class="table-wrap" id="linesTableWrap">
+                <table class="lines-table">
+                  <thead>
+                    <tr>
+                      <th>Service</th>
+                      <th>Basis</th>
+                      <th class="num">Units</th>
+                      <th class="num">Net rate</th>
+                      <th class="num">Markup</th>
+                      <th class="num">Sell</th>
+                      <th class="actions-col"><span class="sr-only">Actions</span></th>
+                    </tr>
+                  </thead>
+                  <tbody id="linesBody"></tbody>
+                </table>
+              </div>
+
+              <div class="lines-footer" id="linesFooter">
+                <span class="muted">All line totals shown in <strong id="linesCurrency">USD</strong>.</span>
+                <span class="lines-net">Net <strong id="linesNetTotal">0</strong></span>
+              </div>
+            </section>
+
+            <section class="panel notes-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="eyebrow">Notes</p>
+                  <h2>Terms &amp; inclusions</h2>
+                </div>
+              </div>
+              <textarea id="quoteNotes" rows="5" placeholder="Included: accommodation, meals as specified, game drives, park fees…&#10;Excluded: international flights, visas, travel insurance, drinks…"></textarea>
+            </section>
+          </div>
+
+          <aside class="quote-side">
+            <section class="panel summary-card">
+              <p class="eyebrow">Quote summary</p>
+              <div class="summary-total">
+                <span class="summary-currency" id="summaryCurrency">USD</span>
+                <strong id="summaryTotal">0</strong>
+              </div>
+              <dl class="summary-list">
+                <div>
+                  <dt>Net contract cost</dt>
+                  <dd id="summaryNet">0</dd>
+                </div>
+                <div>
+                  <dt>Markup <span class="muted" id="summaryMarkupPct">10%</span></dt>
+                  <dd id="summaryMarkup">0</dd>
+                </div>
+                <div>
+                  <dt>Lines</dt>
+                  <dd id="summaryLines">0</dd>
+                </div>
+                <div>
+                  <dt>Per person</dt>
+                  <dd id="summaryPerPerson">0</dd>
+                </div>
+              </dl>
+              <div class="summary-breakdown" id="summaryBreakdown"></div>
+              <button class="btn btn-light btn-block" id="sidePrintBtn" type="button">Print quote</button>
+              <p class="summary-foot">Markup is applied to each line. Lines can override the quote markup.</p>
+            </section>
+
+            <section class="panel tip-card">
+              <p class="eyebrow">Quick tip</p>
+              <p>Set the travel dates and party size first. New lines then start with sensible units and nights.</p>
+            </section>
+          </aside>
+        </div>
+      </section>
+
+      <section class="view hidden" id="view-rates">
+        <div class="rates-layout">
+          <aside class="panel supplier-panel">
+            <div class="panel-head compact">
+              <div>
+                <p class="eyebrow">OneDrive library</p>
+                <h2>Contracts</h2>
+              </div>
+            </div>
+            <input class="search" id="rateSearch" type="search" placeholder="Search suppliers or files…" autocomplete="off">
+            <div class="filter-row">
+              <select id="rateExtFilter" class="select-small">
+                <option value="all">All files</option>
+                <option value="extractable">PDF &amp; Excel only</option>
+              </select>
+            </div>
+            <div class="supplier-list" id="supplierList"></div>
+          </aside>
+
+          <section class="panel rate-panel">
+            <div class="empty-state" id="rateEmpty">
+              <div class="empty-mark" aria-hidden="true">▤</div>
+              <h3>Choose a contract</h3>
+              <p>Select a supplier on the left, then open a PDF or Excel rate sheet. Extract its rates and add them to the quote.</p>
+            </div>
+
+            <div class="rate-detail hidden" id="rateDetail">
+              <div class="panel-head rate-detail-head">
+                <div class="rate-title">
+                  <p class="eyebrow" id="rateSupplier"></p>
+                  <h2 id="rateFile"></h2>
+                  <p class="muted" id="rateMeta"></p>
+                </div>
+                <div class="line-actions">
+                  <a class="btn btn-quiet" id="rateOpen" href="#" target="_blank" rel="noopener">Open file</a>
+                  <button class="btn btn-primary" id="rateExtractBtn" type="button">Extract rates</button>
+                </div>
+              </div>
+
+              <div class="rate-image-wrap hidden" id="rateImageWrap">
+                <img id="rateImage" alt="Contract preview">
+              </div>
+
+              <div class="progress hidden" id="rateProgress">
+                <span class="spinner" aria-hidden="true"></span>
+                <span id="rateProgressText">Reading the contract…</span>
+              </div>
+
+              <div class="results hidden" id="rateResults">
+                <div class="results-toolbar">
+                  <div class="segmented" id="confFilter" role="group" aria-label="Filter by confidence">
+                    <button class="is-active" data-conf="all" type="button">All</button>
+                    <button data-conf="high" type="button">High</button>
+                    <button data-conf="medium" type="button">Medium</button>
+                    <button data-conf="low" type="button">Low</button>
+                  </div>
+                  <button class="residency-toggle is-active" id="rateResidencyToggle" type="button" title="Filter rates by the selected guest type">Non-resident only</button>
+                  <input class="search search-compact" id="candidateSearch" type="search" placeholder="Filter extracted rates…" autocomplete="off">
+                  <span class="candidate-count" id="candidateCount"></span>
+                </div>
+                <p class="extract-note hidden" id="extractNote"></p>
+                <div class="candidate-list" id="candidateList"></div>
+                <details class="raw-pages">
+                  <summary>View extracted text</summary>
+                  <div id="rawPages"></div>
+                </details>
+              </div>
+
+              <div class="rate-manual" id="rateManual">
+                <p class="muted">Can’t find the rate in the extraction? Add it manually — the supplier and file are kept for reference.</p>
+                <button class="btn btn-quiet" id="manualFromFileBtn" type="button">Add a rate manually</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view hidden" id="view-settings">
+        <div class="settings-layout">
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Your details</p>
+                <h1>Quote settings</h1>
+              </div>
+            </div>
+            <div class="form-grid">
+              <label class="field span-2">
+                <span>Company / agency</span>
+                <input id="companyName" type="text" placeholder="Yobra Travel">
+              </label>
+              <label class="field span-2">
+                <span>Tagline</span>
+                <input id="companyTagline" type="text" placeholder="Tailor-made safaris & itineraries">
+              </label>
+              <label class="field">
+                <span>Prepared by</span>
+                <input id="preparedBy" type="text" placeholder="Your name">
+              </label>
+              <label class="field">
+                <span>Email</span>
+                <input id="companyEmail" type="email" placeholder="you@example.com">
+              </label>
+              <label class="field">
+                <span>Phone</span>
+                <input id="companyPhone" type="text" placeholder="+254 …">
+              </label>
+              <label class="field">
+                <span>Default markup</span>
+                <span class="input-suffix">
+                  <input id="defaultMarkup" type="number" min="0" max="100" step="0.5" inputmode="decimal">
+                  <span>%</span>
+                </span>
+              </label>
+              <label class="field">
+                <span>Default quote currency</span>
+                <select id="defaultCurrency">
+                  <option value="USD">USD</option>
+                  <option value="KES">KES</option>
+                  <option value="EUR">EUR</option>
+                  <option value="GBP">GBP</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Currency</p>
+                <h2>Exchange rates</h2>
+              </div>
+            </div>
+            <p class="muted">Units of each currency per 1 US dollar. Used when a contract is quoted in a different currency from the quote.</p>
+            <div class="fx-grid">
+              <label class="field"><span>USD</span><input id="fxUsd" type="number" min="0.0001" step="0.0001" inputmode="decimal"></label>
+              <label class="field"><span>KES</span><input id="fxKes" type="number" min="0.0001" step="0.01" inputmode="decimal"></label>
+              <label class="field"><span>EUR</span><input id="fxEur" type="number" min="0.0001" step="0.0001" inputmode="decimal"></label>
+              <label class="field"><span>GBP</span><input id="fxGbp" type="number" min="0.0001" step="0.0001" inputmode="decimal"></label>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Contract source</p>
+                <h2>OneDrive library</h2>
+              </div>
+              <span class="status-pill" id="settingsSyncStatus">Not synced</span>
+            </div>
+            <label class="field">
+              <span>Public share link</span>
+              <input id="shareUrl" type="url" placeholder="https://1drv.ms/f/…">
+            </label>
+            <div class="settings-actions">
+              <button class="btn btn-primary" id="settingsSyncBtn" type="button">Sync library</button>
+              <span class="muted" id="settingsSyncMeta"></span>
+            </div>
+            <p class="muted small">Syncing refreshes the supplier and file list from the public folder. It does not download every contract; files are fetched only when you extract a rate.</p>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <p class="eyebrow">Data</p>
+                <h2>Backup &amp; restore</h2>
+              </div>
+            </div>
+            <p class="muted">Quotes are stored in this browser. Export a backup before clearing browser data or moving to another machine.</p>
+            <div class="settings-actions">
+              <button class="btn btn-quiet" id="exportBackupBtn" type="button">Export backup</button>
+              <button class="btn btn-quiet" id="importBackupBtn" type="button">Restore backup</button>
+              <button class="btn btn-danger" id="resetBtn" type="button">Clear all quotes</button>
+            </div>
+            <p class="muted small" id="serverStatusLine"></p>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-backdrop hidden" id="lineModal" role="dialog" aria-modal="true" aria-labelledby="lineModalTitle">
+    <div class="modal">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow" id="lineModalEyebrow">Itinerary line</p>
+          <h2 id="lineModalTitle">Add a line</h2>
+        </div>
+        <button class="icon-btn" type="button" data-close="lineModal" aria-label="Close">✕</button>
+      </div>
+      <form id="lineForm" class="modal-body">
+        <input type="hidden" id="lineId">
+        <div class="form-grid">
+          <label class="field span-2">
+            <span>Supplier</span>
+            <input id="lineSupplier" type="text" placeholder="e.g. Angama Mara">
+          </label>
+          <label class="field span-2">
+            <span>Service / description</span>
+            <input id="lineDescription" type="text" placeholder="e.g. Tented suite sharing — peak season" required>
+          </label>
+          <label class="field">
+            <span>Basis</span>
+            <select id="lineBasis"></select>
+          </label>
+          <label class="field">
+            <span>Season / validity</span>
+            <input id="lineSeason" type="text" placeholder="e.g. Peak: 1–30 Sept">
+          </label>
+          <label class="field">
+            <span>Net rate</span>
+            <input id="lineRate" type="number" min="0" step="0.01" inputmode="decimal" required>
+          </label>
+          <label class="field">
+            <span>Currency</span>
+            <select id="lineCurrency">
+              <option value="USD">USD</option>
+              <option value="KES">KES</option>
+              <option value="EUR">EUR</option>
+              <option value="GBP">GBP</option>
+            </select>
+          </label>
+          <label class="field">
+            <span id="lineUnitsLabel">Units</span>
+            <input id="lineUnits" type="number" min="0" step="1" inputmode="numeric">
+          </label>
+          <label class="field" id="lineMultiplierWrap">
+            <span id="lineMultiplierLabel">Nights</span>
+            <input id="lineMultiplier" type="number" min="0" step="1" inputmode="numeric">
+          </label>
+          <label class="field">
+            <span>Markup override</span>
+            <span class="input-suffix">
+              <input id="lineMarkup" type="number" min="0" max="100" step="0.5" inputmode="decimal" placeholder="Quote default">
+              <span>%</span>
+            </span>
+          </label>
+          <label class="field span-2">
+            <span>Notes</span>
+            <input id="lineNotes" type="text" placeholder="Meal basis, inclusions, supplements…">
+          </label>
+          <label class="field span-2 hidden" id="lineSourceWrap">
+            <span>Source</span>
+            <input id="lineSource" type="text" readonly>
+          </label>
+        </div>
+        <div class="line-preview" id="linePreview"></div>
+        <div class="modal-foot">
+          <button class="btn btn-danger hidden" id="lineDeleteBtn" type="button">Delete line</button>
+          <span class="spacer"></span>
+          <button class="btn btn-quiet" type="button" data-close="lineModal">Cancel</button>
+          <button class="btn btn-primary" type="submit">Save line</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="toast hidden" id="toast" role="status" aria-live="polite">
+    <span id="toastText"></span>
+    <button class="toast-action hidden" id="toastAction" type="button"></button>
+  </div>
+
+  <input type="file" id="csvFile" accept=".csv,text/csv" hidden>
+  <input type="file" id="backupFile" accept=".json,application/json" hidden>
+
+  <div id="printDoc" aria-hidden="true"></div>
+
+  <script src="data/inventory.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
