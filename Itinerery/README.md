@@ -24,19 +24,77 @@ rate library, file previews and extraction need the local server.
 ## How it works
 
 1. **Quote builder** — set client, destination, dates, party size, currency and markup.
-   Add lines manually or from the rate library. Every line has a basis, units and a
-   nights/days multiplier, so per-person, per-room, per-group and per-vehicle rates all
-   calculate correctly. A line can override the quote markup.
-2. **Rate library** — the app ships with an inventory of the OneDrive folder
+   Use the **Trip planner** to enter the number of days, choose **Resident** or
+   **Non-resident**, and add each location with its nights. The planner suggests
+   hotels/contracts for the active location and guest type. Add lines manually or from
+   the rate library. Every line has a basis, units and a nights/days multiplier, so
+   per-person, per-room, per-group and per-vehicle rates all calculate correctly. A line
+   can override the quote markup.
+2. **Itinerary framework** — the agency planning aid, and the only place an itinerary is
+   built: the **Places visited** list sits inside this panel, under the framework it fills.
+   Enter the nights, the **Season** (any, high, shoulder or low), pick the areas the
+   clients want (or let **Suggest for these nights** choose a circuit) and the market tier
+   — **Budget**, **Mid-range** or **Luxury**. **Build framework** places the nights where
+   they belong: the Mara gets 3 (min 2, max 4), Amboseli 2, Naivasha, Nakuru and Nairobi 1,
+   and the areas are ordered along a real circuit that avoids backtracking: Nairobi, then
+   the southern leg (Amboseli → Tsavo), then the Rift Valley (Naivasha → Nakuru), then the
+   north (Mount Kenya → Meru → Samburu → Laikipia), then the Mara as the finale, with the
+   coast last. When a beach is in the trip, Tsavo moves to the coast leg (after the Mara)
+   because it sits on the Mombasa road — that is the one stop whose position depends on the
+   rest of the circuit. It then reads the net contract rates and prices each stay in the
+   chosen season. Contracts print their rates in three shapes, and all three are read:
+
+   - **One season per column** — the common case. The headings are read **in the order the
+     table prints them** (low, mid, high, or high, peak, low — whatever the page does), from
+     their x positions, and a trailing conservancy-fee column stays out of the season
+     columns. When the headings are missing, the dates printed beside the table give the
+     column order.
+   - **One season per row** (Salt Lick: "High Season: (02 Jan–31 Mar 2027 …) 326 435 131").
+     The dates in the band decide the season, so a band covering two of our seasons prices
+     both: January is quoted from that row because it is the row the contract prints for
+     January.
+   - **A numeric date table** (Mara Sweet Acacia's "3/1/2027 31/3/2027 200 150 …", Sawela
+     Naivasha's "01/04/2027 30/06/2027 130 170 …"). Each row is one date band, and the
+     occupancy headings above it say what each amount is sold as — double, twin or family
+     per room, "per person in twin" per person, "3rd adult" or child per extra person,
+     single occupancy only when one guest travels.
+
+   Resident and non-resident sections of the same PDF are kept apart, so a resident KES
+   table never prices a non-resident quote, and a contract that prices several properties
+   (Salt Lick's rack-rate PDF also carries Taita Hills) only prices the hotel it is filed
+   under. Each stay shows which contract column priced it
+   ("Priced from High season (column 2)"), so a rate is never quietly taken from another
+   season: if the contract prints no column for the chosen season, the stay falls back to
+   the one it does print and both the stay and the plan flag it. It then picks
+   a hotel per area at the requested tier and lists the room categories each contract sells
+   — B&B, half board, full board, all inclusive, suites — with their per-person prices. A
+   room-category dropdown switches the stay (each option names its season), and an optional
+   budget cap steps the tier down until the total fits. Every stay also shows the other hotels that were read in
+   that area. A place typed into the itinerary also selects its area among the areas the
+   clients want, so the two lists stay in step. **Use this framework** writes the stops and lines into the quote — one line per
+   stay, per person per night on the adults sharing, the way agencies quote — and your
+   markup is applied. Children are not priced in the framework; take child rates from the
+   same contract page. Accommodation rates only — transfers, park fees and flights are not
+   included.
+
+   Tier bands are per person per night on the contract rates: Budget under US$250,
+   Mid-range US$250–650, Luxury above US$650. When an area has no contract in the
+   requested band, the nearest available hotel is used and the plan says so.
+3. **Hotels sorted by location** — every supplier is filed under the area it serves
+   (Masai Mara, Amboseli, Naivasha, Diani…), both in the rate library and in the planner
+   matches. Use the location filter in the rate library to see one area at a time.
+4. **Rate library** — the app ships with an inventory of the OneDrive folder
    (`data/inventory.json`). Pick a supplier and contract file, then **Extract rates**.
    The server downloads that one file, reconstructs visual rows from the PDF, and
-   proposes rate candidates with season labels, currency and unit hints. Add any amount
-   to the quote with one click. Review the candidates against the PDF; contract layouts
+   proposes rate candidates with season labels, currency, residency and unit hints.
+   Extracted rates are filtered to the quote’s guest type by default; use the
+   **Resident only / Non-resident only** toggle to show all rates. Add any amount to
+   the quote with one click. Review the candidates against the PDF; contract layouts
    vary a lot, so extraction is a shortcut, not an authority.
-3. **Print / PDF** — produces a clean client-facing quotation with company details,
+5. **Print / PDF** — produces a clean client-facing quotation with company details,
    itinerary lines, net/markup/total, per-person total and notes. Use the browser’s
    “Save as PDF” option for a PDF.
-4. **Sync** — refreshes the supplier/file list from the public OneDrive share. It does
+6. **Sync** — refreshes the supplier/file list from the public OneDrive share. It does
    not download every contract; files are fetched only when you extract a rate.
 
 ## Currency

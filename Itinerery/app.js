@@ -60,7 +60,7 @@ const BASIS = {
     unitsLabel: 'People',
     multiplier: 'days',
     unitDefault: (q) => Math.max(1, num(q.adults, 1)),
-    multDefault: (q) => quoteNights(q),
+    multDefault: (q) => quoteDays(q),
   },
   per_group: {
     label: 'Per group / flat',
@@ -73,7 +73,7 @@ const BASIS = {
     unitsLabel: 'Groups',
     multiplier: 'days',
     unitDefault: () => 1,
-    multDefault: (q) => quoteNights(q),
+    multDefault: (q) => quoteDays(q),
   },
   per_vehicle: {
     label: 'Per vehicle',
@@ -86,14 +86,14 @@ const BASIS = {
     unitsLabel: 'Vehicles',
     multiplier: 'days',
     unitDefault: () => 1,
-    multDefault: (q) => quoteNights(q),
+    multDefault: (q) => quoteDays(q),
   },
   per_day: {
     label: 'Per day (flat)',
     unitsLabel: 'Groups',
     multiplier: 'days',
     unitDefault: () => 1,
-    multDefault: (q) => quoteNights(q),
+    multDefault: (q) => quoteDays(q),
   },
 };
 
@@ -199,12 +199,29 @@ function datesLabel(quote) {
 }
 
 function quoteNights(quote) {
-  if (!quote || !quote.startDate || !quote.endDate) return 1;
-  const start = new Date(`${quote.startDate}T00:00:00`);
-  const end = new Date(`${quote.endDate}T00:00:00`);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 1;
-  const nights = Math.round((end.getTime() - start.getTime()) / 86400000);
-  return Math.max(1, nights);
+  if (quote && quote.startDate && quote.endDate) {
+    const start = new Date(`${quote.startDate}T00:00:00`);
+    const end = new Date(`${quote.endDate}T00:00:00`);
+    if (!Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())) {
+      const nights = Math.round((end.getTime() - start.getTime()) / 86400000);
+      return Math.max(1, nights);
+    }
+  }
+  if (quote && Array.isArray(quote.stops)) {
+    const stopNights = quote.stops.reduce(
+      (sum, stop) => sum + Math.max(0, Math.round(num(stop.nights, 0))),
+      0
+    );
+    if (stopNights > 0) return stopNights;
+  }
+  return 1;
+}
+
+function quoteDays(quote) {
+  if (!quote) return 1;
+  const days = Math.round(num(quote.tripDays, 0));
+  if (Number.isFinite(days) && days >= 1) return days;
+  return Math.max(1, quoteNights(quote) + 1);
 }
 
 function unitWord(label, count) {
@@ -536,7 +553,6 @@ function cacheDom() {
     'linesFooter',
     'linesCurrency',
     'linesNetTotal',
-    'tripDays',
     'residency',
     'plannerDays',
     'plannerDaysPlural',
@@ -546,6 +562,21 @@ function cacheDom() {
     'stopsList',
     'hotelMatchesHint',
     'hotelMatchList',
+    'frameworkPlanner',
+    'frameworkDays',
+    'frameworkSeason',
+    'frameworkTier',
+    'frameworkBudget',
+    'frameworkCurrencyLabel',
+    'frameworkBuildBtn',
+    'frameworkStatus',
+    'frameworkStatusText',
+    'frameworkResult',
+    'frameworkAreaChips',
+    'frameworkAreaHint',
+    'frameworkSuggestBtn',
+    'frameworkNightPill',
+    'frameworkAreaPill',
     'quoteNotes',
     'summaryCurrency',
     'summaryTotal',
@@ -558,6 +589,7 @@ function cacheDom() {
     'sidePrintBtn',
     'rateSearch',
     'rateExtFilter',
+    'rateLocationFilter',
     'supplierList',
     'rateEmpty',
     'rateDetail',
@@ -683,6 +715,10 @@ async function loadServer() {
 
   if (!inventory || !Array.isArray(inventory.suppliers)) inventory = emptyInventory();
   updateServerUI();
+  populateLocationFilter();
+  populateAreaChips();
+  initFrameworkAreas(activeQuote());
+  populateAreaChips();
   renderSuppliers();
   updateRateActions();
   renderPlanner();
@@ -754,6 +790,7 @@ function updateServerUI() {
           : ''
       }`
     : 'Local server offline — rate extraction is unavailable. Run python3 server.py to enable it.';
+  if (dom.frameworkBuildBtn) dom.frameworkBuildBtn.disabled = frameworkState.busy || !serverOnline;
   if (state && state.settings) {
     if (!state.settings.shareUrl && inventory.shareUrl) state.settings.shareUrl = inventory.shareUrl;
     dom.shareUrl.value = state.settings.shareUrl || inventory.shareUrl || '';
@@ -787,9 +824,11 @@ async function syncLibrary() {
       body: JSON.stringify({ url }),
     });
     inventory = data.inventory;
+    supplierAreaCache.clear();
     if (inventory.shareUrl) state.settings.shareUrl = inventory.shareUrl;
     saveState(true);
     updateServerUI();
+    populateLocationFilter();
     renderSuppliers({ resetScroll: true });
     toast(`Synced ${num(inventory.fileCount, 0)} files from ${num(inventory.supplierCount, 0)} suppliers.`);
   } catch (error) {
@@ -861,9 +900,16 @@ function ensureActiveStop(quote = activeQuote()) {
   return quote.stops.find((stop) => stop.id === activeStopId) || quote.stops[0];
 }
 
+function activeStopNights(quote = activeQuote()) {
+  const stop = ensureActiveStop(quote);
+  return Math.max(1, Math.round(num(stop.nights, 1)));
+}
+
 function syncTripDays(quote = activeQuote()) {
-  const nights = totalNights(quote);
-  quote.tripDays = Math.max(1, nights || Math.round(num(quote.tripDays, 1)) || 1);
+  const days = Math.round(num(quote.tripDays, 0));
+  if (!Number.isFinite(days) || days < 1) {
+    quote.tripDays = Math.max(1, totalNights(quote) + 1);
+  }
   return quote.tripDays;
 }
 
@@ -950,12 +996,204 @@ function matchingHotelsForStop(stop, residency) {
   if (!inventory || !Array.isArray(inventory.suppliers)) return [];
   const tokens = locationTokens(stop.location);
   if (!tokens.length) return [];
-  return inventory.suppliers
-    .map((supplier) => ({ supplier, score: scoreSupplierForStop(supplier, stop, residency) }))
+  const requested = detectAreaFromText(stop.location);
+  const decorated = inventory.suppliers.map((supplier) => {
+    const area = detectSupplierArea(supplier);
+    let score = scoreSupplierForStop(supplier, stop, residency);
+    if (requested && area.key === requested.key) score += 5;
+    return { supplier, area, score };
+  });
+  return decorated
     .filter((item) => item.score > 0)
-    .sort((a, b) => b.score - a.score || a.supplier.name.localeCompare(b.supplier.name))
-    .slice(0, 12)
-    .map(({ supplier }) => supplier);
+    .sort(
+      (a, b) =>
+        a.area.label.localeCompare(b.area.label) ||
+        b.score - a.score ||
+        a.supplier.name.localeCompare(b.supplier.name)
+    )
+    .slice(0, 18);
+}
+
+/* --------------------------------------------------------------------------
+   Locations — every hotel is filed under the area it serves
+--------------------------------------------------------------------------- */
+
+const AREA_CATALOG = [
+  {
+    key: 'mara',
+    label: 'Masai Mara',
+    patterns: [
+      'masai mara', 'maasai mara', 'mara', 'talek', 'ol kiombo', 'sek enani', 'olare',
+      'keekorok', 'musiara', 'siana', 'lemek', 'aitong', 'mara river', 'mara north',
+      'mara conservancy', 'mara triangle', 'mara rip' ,'rip oi',
+    ],
+  },
+  {
+    key: 'amboseli',
+    label: 'Amboseli',
+    patterns: ['amboseli', 'kimana', 'tortilis', 'ol tukai', 'sinet', 'chylu', 'kajiado'],
+  },
+  {
+    key: 'naivasha',
+    label: 'Naivasha',
+    patterns: [
+      'naivasha', 'lake naivasha', 'hells gate', 'hell gate', 'longonot', 'kigio',
+      'sawela', 'elmer', 'morendat', 'great rift',
+    ],
+  },
+  {
+    key: 'nakuru',
+    label: 'Nakuru / Elementaita',
+    patterns: ['nakuru', 'bogoria', 'elementaita', 'lake nakuru', 'lake elementaita'],
+  },
+  {
+    key: 'nairobi',
+    label: 'Nairobi',
+    patterns: [
+      'nairobi', 'nbo', 'karen', 'upperhill', 'westlands', 'jkia', 'wilson', 'gigiri',
+      'lavington', 'kilimani', 'parklands', 'villa rosa', 'norfolk', 'westwood',
+    ],
+  },
+  {
+    key: 'diani',
+    label: 'Diani / South Coast',
+    patterns: ['diani', 'ukunda', 'south coast', 'msambweni', 'galu', 'tiwi', 'chale'],
+  },
+  {
+    key: 'mombasa',
+    label: 'Mombasa',
+    patterns: ['mombasa', 'nyali', 'bamburi', 'shanzu', 'mombasa reef', 'serena beach'],
+  },
+  {
+    key: 'watamu',
+    label: 'Watamu / Malindi',
+    patterns: ['watamu', 'malindi', 'kilifi', 'vipingo', 'casuarina', 'marijani'],
+  },
+  {
+    key: 'lamu',
+    label: 'Lamu',
+    patterns: ['lamu', 'manda', 'shella', 'peponi'],
+  },
+  {
+    key: 'samburu',
+    label: 'Samburu',
+    patterns: ['samburu', 'shaba', 'buffalo springs', 'archers post', 'kalama'],
+  },
+  {
+    key: 'laikipia',
+    label: 'Laikipia / Ol Pejeta',
+    patterns: [
+      'laikipia', 'ol pejeta', 'olpejeta', 'sweetwaters', 'lewa', 'borana', 'segera',
+      'nanyuki', 'loisaba', 'suyian', 'maasai land', 'ol jogi', 'oljogi',
+    ],
+  },
+  {
+    key: 'tsavo',
+    label: 'Tsavo / Taita Hills',
+    patterns: ['tsavo', 'taita', 'voi', 'salt lick', 'saltlick', 'kilaguni', 'ngutuni', 'manyatta'],
+  },
+  {
+    key: 'meru',
+    label: 'Meru',
+    patterns: ['meru', 'kisampa', 'murera'],
+  },
+  {
+    key: 'mtkenya',
+    label: 'Mount Kenya',
+    patterns: ['mount kenya', 'mt kenya', 'serena mountain', 'timau', 'naromoru', 'naro moru'],
+  },
+  {
+    key: 'western',
+    label: 'Western Kenya',
+    patterns: ['kisumu', 'kakamega', 'kisii', 'siaya', 'mbita', 'rusinga', 'kisumu impala'],
+  },
+];
+
+const OTHER_AREA = { key: 'other', label: 'Multi-property / other', score: 0 };
+const supplierAreaCache = new Map();
+
+function areaRegex(pattern) {
+  return new RegExp(`\\b${String(pattern).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+}
+
+function detectAreaFromText(text) {
+  const value = String(text || '').toLowerCase();
+  if (!value.trim()) return null;
+  let best = null;
+  for (const area of AREA_CATALOG) {
+    for (const pattern of area.patterns) {
+      if (!areaRegex(pattern).test(value)) continue;
+      const score = pattern.length;
+      if (!best || score > best.score) best = { key: area.key, label: area.label, score };
+    }
+  }
+  return best;
+}
+
+function detectSupplierArea(supplier) {
+  if (!supplier) return { ...OTHER_AREA };
+  const cacheKey = supplier.id || supplier.name || '';
+  if (supplierAreaCache.has(cacheKey)) return supplierAreaCache.get(cacheKey);
+
+  const nameBlob = `${supplier.name || ''} ${supplier.folder || ''}`.toLowerCase();
+  const fileBlob = (supplier.files || [])
+    .map((file) => String(file.name || ''))
+    .join(' ')
+    .toLowerCase();
+
+  let best = null;
+  for (const area of AREA_CATALOG) {
+    let score = 0;
+    for (const pattern of area.patterns) {
+      const regex = areaRegex(pattern);
+      const nameHits = (nameBlob.match(regex) || []).length;
+      const fileHits = Math.min(3, (fileBlob.match(regex) || []).length);
+      if (!nameHits && !fileHits) continue;
+      score += nameHits * 7 + fileHits * 2 + Math.min(2, pattern.length / 8);
+    }
+    if (score > 0 && (!best || score > best.score)) {
+      best = { key: area.key, label: area.label, score };
+    }
+  }
+
+  const result = best || { ...OTHER_AREA };
+  supplierAreaCache.set(cacheKey, result);
+  return result;
+}
+
+function groupedSuppliers() {
+  const groups = new Map();
+  (inventory.suppliers || []).forEach((supplier, index) => {
+    const area = detectSupplierArea(supplier);
+    if (!groups.has(area.key)) {
+      groups.set(area.key, { key: area.key, label: area.label, hotels: [] });
+    }
+    groups.get(area.key).hotels.push({ supplier, index, area });
+  });
+  return Array.from(groups.values())
+    .map((group) => ({
+      ...group,
+      hotels: group.hotels.sort((a, b) => a.supplier.name.localeCompare(b.supplier.name)),
+    }))
+    .sort((a, b) => {
+      if (a.key === 'other') return 1;
+      if (b.key === 'other') return -1;
+      return a.label.localeCompare(b.label);
+    });
+}
+
+function populateLocationFilter() {
+  if (!dom.rateLocationFilter) return;
+  const current = dom.rateLocationFilter.value || 'all';
+  const groups = groupedSuppliers();
+  const options = groups
+    .map(
+      (group) =>
+        `<option value="${escapeHtml(group.key)}">${escapeHtml(group.label)} (${group.hotels.length})</option>`
+    )
+    .join('');
+  dom.rateLocationFilter.innerHTML = `<option value="all">All locations</option>${options}`;
+  dom.rateLocationFilter.value = groups.some((group) => group.key === current) ? current : 'all';
 }
 
 function renderQuoteMeta() {
@@ -974,18 +1212,31 @@ function renderQuoteMeta() {
   renderPlanner();
 }
 
-function renderPlanner() {
-  const quote = activeQuote();
-  ensureActiveStop(quote);
-  syncTripDays(quote);
-
-  dom.tripDays.value = quote.tripDays;
-  dom.residency.value = quote.residency || 'non-resident';
+function updatePlannerCounts(quote = activeQuote()) {
   const nights = totalNights(quote);
   dom.plannerDays.textContent = String(quote.tripDays);
   dom.plannerNights.textContent = String(nights);
   dom.plannerDaysPlural.textContent = quote.tripDays === 1 ? '' : 's';
   dom.plannerNightsPlural.textContent = nights === 1 ? '' : 's';
+  if (!dom.frameworkDays.value) dom.frameworkDays.value = quote.tripDays;
+}
+
+function renderPlanner() {
+  const quote = activeQuote();
+  ensureActiveStop(quote);
+  syncTripDays(quote);
+
+  dom.residency.value = quote.residency || 'non-resident';
+  if (frameworkState.quoteId !== quote.id) {
+    frameworkState.quoteId = quote.id;
+    frameworkState.plan = null;
+    dom.frameworkDays.value = quote.tripDays;
+    renderFrameworkPlan();
+  }
+  dom.frameworkCurrencyLabel.textContent = quote.currency;
+  dom.frameworkBuildBtn.disabled = frameworkState.busy || !serverOnline;
+  updateFrameworkPills();
+  updatePlannerCounts(quote);
 
   renderStops();
   renderHotelMatches();
@@ -1027,7 +1278,7 @@ function renderHotelMatches() {
   }
 
   dom.hotelMatchesHint.textContent = matches.length
-    ? `${matches.length} match${matches.length === 1 ? '' : 'es'} for “${location}” · ${residency === 'resident' ? 'Resident' : 'Non-resident'}`
+    ? `${matches.length} match${matches.length === 1 ? '' : 'es'} for “${location}” · sorted by location · ${residency === 'resident' ? 'Resident' : 'Non-resident'}`
     : `No direct matches for “${location}”. Try a nearby area name or browse the full rate library.`;
 
   if (!matches.length) {
@@ -1036,7 +1287,7 @@ function renderHotelMatches() {
   }
 
   dom.hotelMatchList.innerHTML = matches
-    .map((supplier) => {
+    .map(({ supplier, area }, matchIndex) => {
       const files = (supplier.files || []).filter((file) => isExtractable(file) || isImageFile(file));
       const preferred = files.filter((file) => fileMatchesResidency(file, residency));
       const showFiles = (preferred.length ? preferred : files).slice(0, 3);
@@ -1047,12 +1298,13 @@ function renderHotelMatches() {
         })
         .join('');
       return `
-        <article class="hotel-card">
+        <article class="hotel-card" style="--i:${matchIndex}">
           <div class="hotel-card-head">
             <div>
               <h4>${escapeHtml(supplier.name)}</h4>
-              <div class="hotel-meta">${supplier.files.length} file${supplier.files.length === 1 ? '' : 's'} in contract library</div>
+              <div class="hotel-meta">${supplier.files.length} file${supplier.files.length === 1 ? '' : 's'} · ${escapeHtml(area.label)}</div>
             </div>
+            <span class="area-badge">${escapeHtml(area.label)}</span>
           </div>
           <div class="hotel-files">${fileChips || '<span class="hotel-meta">No extractable rate files</span>'}</div>
           <div class="hotel-actions">
@@ -1061,6 +1313,1123 @@ function renderHotelMatches() {
         </article>`;
     })
     .join('');
+}
+
+/* --------------------------------------------------------------------------
+   Budget planner — read contract rates, build an itinerary that fits
+--------------------------------------------------------------------------- */
+
+const RATE_NOISE_RE = /(transfer|flight|balloon|park fee|park fees|conservation|conservancy|guide|laundry|\bspa\b|activity|activities|excursion|game drive|game drives|meal|lunch|dinner|airport|airstrip|child|children|infant|kids|extra bed|supplement|deposit|conference|wedding|day room|day use|per vehicle|per group|capacity fee|vehicle capacity|per day|per trip|per stay|terms|policy|policie|cancellation|cancelled|check[\s-]?in|check[\s-]?out|release period|minimum|commission|booking|payment|will apply|applies|honeymoon|festive|easter|christmas|x[\s-]?mas|new year|photo|boat|buffet|swimming|wine|basket|additional|extra|reduction|discount|3rd adult|third adult|no show|refund|liable|penalt|\badd\.)/i;
+
+// Rows that look like an actual accommodation rate rather than an add-on.
+const RATE_ROW_RE = /(room|suite|tent|villa|cottage|cabin|chalet|banda|apartment|bungalow|double|single|twin|triple|sharing|full[\s-]?board|half[\s-]?board|bed\s*(?:&|and)\s*breakfast|breakfast|all[\s-]?inclusive|accommodation|per person per night|per person\/night|pppn|standard|deluxe|superior|luxury|family|executive|presidential|penthouse|nightly|per night)/i;
+
+// Units that can price a stay in the framework. A column sold per child, per extra
+// person or per vehicle never becomes the nightly rate.
+const PRICED_UNITS = ['per_person_night', 'per_room_night', 'per_night', 'per_person', 'per_single_night'];
+
+function sampleEvery(list, count) {
+  if (list.length <= count) return list.slice();
+  const step = (list.length - 1) / Math.max(1, count - 1);
+  const picked = [];
+  for (let index = 0; index < count; index += 1) {
+    const item = list[Math.round(index * step)];
+    if (item && !picked.includes(item)) picked.push(item);
+  }
+  return picked;
+}
+
+function rateFileCandidates(supplier, residency) {
+  const files = (supplier.files || []).filter(isExtractable);
+  const score = (file) => {
+    const name = String(file.name || '').toLowerCase();
+    let value = 0;
+    if (fileMatchesResidency(file, residency)) value += 5;
+    if (/rate|contract|tariff|rack|sto|nett|net|price|accommodation/.test(name)) value += 4;
+    if (/resident/.test(name) && residency === 'resident') value += 3;
+    if (/non[\s-]?resident/.test(name) && residency === 'non-resident') value += 3;
+    if (/fact|brochure|activit|transfer|terms|policy|presentation|agenda|map|photo|offer|deal/.test(name)) value -= 7;
+    if (fileExt(file) === 'xlsx') value += 1;
+    return value;
+  };
+  return files
+    .slice()
+    .sort((a, b) => score(b) - score(a) || String(a.name).localeCompare(String(b.name)));
+}
+
+// Table rows carry their table's title in the description ("1. SALT LICK SAFARI
+// LODGE — PARK VIEW ROOMS — High Season…"), so the property a row belongs to is
+// the text before the first dash.
+function tableProperty(candidate) {
+  if (!Array.isArray(candidate.amountUnits) || !candidate.amountUnits.length) return '';
+  return String(candidate.description || '').split(' — ')[0].replace(/^\d+\.\s*/, '').trim();
+}
+
+const PROPERTY_STOPWORDS = new Set([
+  'the', 'and', 'of', 'ltd', 'limited', 'safari', 'lodge', 'camp', 'resort', 'spa', 'hotel',
+  'room', 'rooms', 'suite', 'suites', 'tent', 'tents', 'cottage', 'cottages', 'view', 'views',
+]);
+
+function propertyWords(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(' ')
+    .filter((word) => word && !PROPERTY_STOPWORDS.has(word));
+}
+
+// One contract can price several properties from the same folder (Salt Lick and
+// Taita Hills share a rack-rate PDF), so drop the tables belonging to the others.
+// A file that prices one property is left alone, whatever its title reads like.
+function propertiesToExclude(rows, supplierName) {
+  const properties = Array.from(new Set(rows.map(tableProperty).filter(Boolean)));
+  if (properties.length < 2) return new Set();
+  const wanted = propertyWords(supplierName);
+  if (!wanted.length) return new Set();
+  const matching = properties.filter((property) => {
+    const words = new Set(propertyWords(property));
+    const shared = wanted.filter((word) => words.has(word)).length;
+    return shared >= Math.min(2, wanted.length);
+  });
+  if (!matching.length) return new Set();
+  return new Set(properties.filter((property) => !matching.includes(property)));
+}
+
+function rateOptionsFor(item, quote, wantedResidency) {
+  const adults = Math.max(1, num(quote.adults, 2));
+  const party = adults + Math.max(0, num(quote.children, 0));
+  const rooms = Math.max(1, Math.ceil(party / 2));
+  const options = [];
+
+  for (const file of item.files || []) {
+    const excluded = propertiesToExclude(file.candidates || [], item.name);
+    for (const candidate of file.candidates || []) {
+      if (excluded.has(tableProperty(candidate))) continue;
+      const description = String(candidate.description || '');
+      if (!description) continue;
+      // A table row the extractor read column by column is a rate, even when the
+      // property name carries a noise word ("… Safari Resort & Spa").
+      const tableRow = Array.isArray(candidate.amountUnits) && candidate.amountUnits.length > 0;
+      if (!tableRow && RATE_NOISE_RE.test(description)) continue;
+      const residency = String(candidate.residency || 'unknown');
+      if (residency !== 'unknown' && residency !== wantedResidency) continue;
+      const unit = String(candidate.unit || '');
+      const labels = Array.isArray(candidate.amountLabels) ? candidate.amountLabels : [];
+      const seasonsPerColumn = Array.isArray(candidate.amountSeasons) ? candidate.amountSeasons : [];
+      const columnLabels = Array.isArray(candidate.amountColumns) ? candidate.amountColumns : [];
+      const columnUnits = Array.isArray(candidate.amountUnits) ? candidate.amountUnits : [];
+      (candidate.amounts || []).forEach((amount, index) => {
+        const value = num(amount, 0);
+        if (value <= 0) return;
+        const rawLabel = String(labels[index] || '');
+        if (tableRow && RATE_NOISE_RE.test(`${candidate.seasonHint || ''} ${rawLabel}`)) return;
+        // Season-per-row tables sell each column in its own unit: "DOUBLE" per room,
+        // "3rd adult" per extra person, "SINGLE" only when one guest travels alone.
+        const columnUnit = columnUnits[index] || unit;
+        if (!PRICED_UNITS.includes(columnUnit)) return;
+        if (columnUnit === 'per_single_night' && adults > 1) return;
+        const perRoom =
+          columnUnit === 'per_room_night' || columnUnit === 'per_night' || columnUnit === 'per_single_night';
+        const partyNightly = convertCurrency(
+          value * (perRoom ? rooms : adults),
+          candidate.currency || quote.currency,
+          quote.currency
+        );
+        if (partyNightly < 20 || partyNightly > 250000) return;
+        // Guard against half-parsed cells and add-on amounts.
+        if (convertCurrency(partyNightly / adults, quote.currency, 'USD') < 30) return;
+        // The extractor records which season each printed column prices. Never guess a
+        // season here: a column it could not place stays unseasoned, and the plan says so.
+        const seasons = (Array.isArray(seasonsPerColumn[index]) ? seasonsPerColumn[index] : []).filter(
+          (key) => FRAMEWORK_SEASONS[key]
+        );
+        const columnLabel =
+          columnLabels[index] ||
+          (rawLabel && !/^option\s*\d+$/i.test(rawLabel) ? rawLabel : `Column ${index + 1}`);
+        options.push({
+          label:
+            rawLabel && !/^option\s*\d+$/i.test(rawLabel)
+              ? rawLabel
+              : candidate.description || candidate.seasonHint || 'Rate',
+          amount: value,
+          unit: columnUnit,
+          description,
+          fileName: file.name || '',
+          partyNightly,
+          season: seasons[0] || '',
+          seasons,
+          seasonLabel: seasons.map((key) => FRAMEWORK_SEASONS[key].label).join(' / '),
+          columnLabel,
+          accommodation: RATE_ROW_RE.test(description) || RATE_ROW_RE.test(rawLabel),
+        });
+      });
+    }
+  }
+
+  const seen = new Set();
+  const unique = [];
+  for (const option of options) {
+    const key = `${option.unit}|${option.amount}|${option.label}|${option.seasons.join(',')}|${option.fileName}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(option);
+  }
+
+  // Only rows that read like accommodation can price a stay. Date headers, policy
+  // rows and add-ons are common on these contracts and would understate the rate.
+  // Cheapest first. No percentile cut: a family suite costs about twice a double, so
+  // trimming the low end would quietly drop the room an agency actually quotes.
+  return unique.filter((option) => option.accommodation).sort((a, b) => a.partyNightly - b.partyNightly);
+}
+
+async function readHotelRates(entries, quote) {
+  const items = entries.map((entry, index) => ({
+    key: String(index),
+    name: entry.supplier.name,
+    location: entry.area.label,
+    paths: entry.paths,
+  }));
+  const data = await api('/api/rates', {
+    method: 'POST',
+    body: JSON.stringify({ items }),
+  });
+  const results = Array.isArray(data.items) ? data.items : [];
+  const byKey = new Map(results.map((item) => [String(item.key), item]));
+  const wantedResidency = quote.residency === 'resident' ? 'resident' : 'non-resident';
+  const hotels = [];
+
+  entries.forEach((entry, index) => {
+    const result = byKey.get(String(index));
+    if (!result) return;
+    const options = rateOptionsFor(result, quote, wantedResidency);
+    if (!options.length) return;
+    const best = options[0];
+    hotels.push({
+      supplier: entry.supplier,
+      area: entry.area,
+      name: entry.supplier.name,
+      fileName: best.fileName,
+      options,
+    });
+  });
+  return hotels;
+}
+
+const FRAMEWORK_TIERS = {
+  budget: {
+    label: 'Budget',
+    low: 0,
+    high: 250,
+    blurb: 'Simple lodges and camps, usually full board.',
+  },
+  midrange: {
+    label: 'Mid-range',
+    low: 250,
+    high: 650,
+    blurb: 'Comfortable lodges and permanent tented camps.',
+  },
+  luxury: {
+    label: 'Luxury',
+    low: 650,
+    high: Infinity,
+    blurb: 'Conservancy camps and premium lodges.',
+  },
+};
+
+const FRAMEWORK_SEASONS = {
+  high: { label: 'High season', hint: 'Jul–Oct and the Christmas peak' },
+  shoulder: { label: 'Shoulder season', hint: 'Jan–Mar, Jun and Nov' },
+  low: { label: 'Low season', hint: 'Apr–May long rains' },
+};
+
+// How long each area deserves, and where it sits on a sensible circuit.
+//
+// `route` groups areas by the leg they belong to, so the framework never sends a
+// client back and forth across the country:
+//   0      Nairobi — arrival / departure
+//   10-19  southern leg: Amboseli, then Tsavo (a natural drive on to the coast)
+//   20-29  Rift Valley leg: Naivasha, Nakuru, western Kenya
+//   30-39  northern leg: Mount Kenya, Meru, Samburu, Laikipia
+//   40-49  Masai Mara — the finale
+//   50-59  coast — the beach add-on after the bush
+const AREA_FRAMEWORK = {
+  nairobi: { min: 1, ideal: 1, max: 2, route: 0, transfer: 'Arrival / departure hub', note: 'Arrival or departure night only.' },
+  amboseli: { min: 1, ideal: 2, max: 3, route: 10, transfer: '~4 h drive from Nairobi', note: 'Elephants under Kilimanjaro; two mornings for a clear view.' },
+  tsavo: { min: 1, ideal: 2, max: 3, route: 12, transfer: '5–6 h drive from Nairobi', note: 'Red elephants and space, good en route to the coast.' },
+  naivasha: { min: 1, ideal: 1, max: 2, route: 20, transfer: '1.5–2 h drive from Nairobi', note: 'Boat ride and Crescent Island walk — one night is plenty.' },
+  nakuru: { min: 1, ideal: 1, max: 2, route: 21, transfer: '2.5–3 h drive from Nairobi', note: 'Rhino sanctuary, usually a night en route to the Mara.' },
+  western: { min: 1, ideal: 2, max: 3, route: 22, transfer: '6 h drive or ~1 h flight', note: 'Kakamega and Lake Victoria country.' },
+  mtkenya: { min: 1, ideal: 1, max: 2, route: 30, transfer: '~3 h drive', note: 'Highland stop, usually one night.' },
+  meru: { min: 1, ideal: 2, max: 3, route: 31, transfer: '4–5 h drive', note: 'Quiet park with Elsa’s Kopje country.' },
+  samburu: { min: 1, ideal: 2, max: 3, route: 32, transfer: '5–6 h drive or ~1 h flight', note: 'Samburu Special Five — northern circuit.' },
+  laikipia: { min: 1, ideal: 2, max: 3, route: 33, transfer: '3–4 h drive from Nairobi', note: 'Conservancies, rhino and night drives.' },
+  mara: { min: 2, ideal: 3, max: 4, route: 40, transfer: '5–6 h drive from Nairobi or ~45 min by air', note: 'Anchor the trip here: big cats year-round, migration Jul–Oct.' },
+  diani: { min: 2, ideal: 4, max: 6, route: 50, transfer: '~1 h flight or 8 h drive', note: 'Beach finale after the bush.' },
+  mombasa: { min: 2, ideal: 3, max: 5, route: 51, transfer: '~1 h flight or 8 h drive', note: 'Beach finale after the bush.' },
+  watamu: { min: 2, ideal: 3, max: 5, route: 52, transfer: '~1 h flight to Malindi', note: 'Beach finale after the bush.' },
+  lamu: { min: 2, ideal: 3, max: 5, route: 53, transfer: 'Flight via Nairobi or Mombasa', note: 'Beach finale after the bush.' },
+};
+
+const frameworkState = { busy: false, plan: null, areas: new Set() };
+
+function areaMeta(key) {
+  const catalog = AREA_CATALOG.find((area) => area.key === key);
+  const framework = AREA_FRAMEWORK[key] || { min: 1, ideal: 2, max: 3, route: 8, transfer: '', note: '' };
+  return { key, label: catalog ? catalog.label : key, ...framework };
+}
+
+// Order the chosen areas into one continuous circuit. Tsavo sits between Amboseli
+// and Nairobi on a southern loop, but it is also the natural stop on the road to
+// the coast — so when a beach is in the trip it moves to the coast leg, after the Mara.
+function orderAreas(keys) {
+  const hasCoast = keys.some((key) => areaMeta(key).route >= 50);
+  const rank = (key) => {
+    if (key === 'tsavo' && hasCoast) return 45;
+    return areaMeta(key).route;
+  };
+  return keys.slice().sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+}
+
+function frameworkAreaKeys() {
+  return AREA_CATALOG.filter((area) => AREA_FRAMEWORK[area.key]).map((area) => area.key);
+}
+
+function suggestAreas(days) {
+  if (days <= 3) return ['mara'];
+  if (days <= 5) return ['mara', 'naivasha'];
+  if (days <= 7) return ['mara', 'amboseli'];
+  if (days <= 10) return ['mara', 'amboseli', 'samburu'];
+  return ['mara', 'amboseli', 'samburu', 'diani'];
+}
+
+function allocateNights(days, keys) {
+  const warnings = [];
+  const valid = frameworkAreaKeys();
+  let areas = orderAreas(Array.from(new Set(keys.filter((key) => valid.includes(key)))));
+
+  if (!areas.length) return { stays: [], warnings: ['Choose at least one area.'] };
+
+  if (areas.length > 4) {
+    warnings.push('Four areas is the practical maximum for one safari; the framework keeps the four best placed on the route.');
+    areas = areas.slice(0, 4);
+  }
+
+  while (areas.length > 1 && areas.reduce((sum, key) => sum + areaMeta(key).min, 0) > days) {
+    const droppable = areas.filter((key) => key !== 'mara');
+    const drop = (droppable.length ? droppable : areas).slice(-1)[0];
+    const meta = areaMeta(drop);
+    warnings.push(
+      `${meta.label} needs at least ${meta.min} night${meta.min === 1 ? '' : 's'}, so it is not in this ${days}-night framework.`
+    );
+    areas = areas.filter((key) => key !== drop);
+  }
+
+  if (areas.length > days) {
+    warnings.push(`Only ${days} night${days === 1 ? '' : 's'} to place — keeping ${days} area${days === 1 ? '' : 's'}.`);
+    areas = areas.slice(0, days);
+  }
+
+  const nights = new Map(areas.map((key) => [key, Math.max(1, Math.min(areaMeta(key).min, days))]));
+  let remaining = days - Array.from(nights.values()).reduce((a, b) => a + b, 0);
+
+  const priority = areas.slice().sort((a, b) => {
+    const rank = (key) => (key === 'mara' ? 0 : 1);
+    return rank(a) - rank(b) || areaMeta(b).ideal - areaMeta(a).ideal;
+  });
+
+  const fill = (limit) => {
+    for (const key of priority) {
+      if (remaining <= 0) break;
+      const meta = areaMeta(key);
+      if (nights.get(key) < meta[limit]) {
+        nights.set(key, nights.get(key) + 1);
+        remaining -= 1;
+      }
+    }
+  };
+  fill('ideal');
+  fill('max');
+
+  if (remaining > 0) {
+    const last = areas[areas.length - 1];
+    nights.set(last, nights.get(last) + remaining);
+    warnings.push(
+      `Added ${remaining} extra night${remaining === 1 ? '' : 's'} to ${areaMeta(last).label}; consider a second area instead.`
+    );
+  }
+
+  let day = 1;
+  const stays = areas.map((key) => {
+    const meta = areaMeta(key);
+    const count = nights.get(key);
+    const stay = {
+      key,
+      label: meta.label,
+      nights: count,
+      from: day,
+      to: day + count - 1,
+      transfer: meta.transfer,
+      note: meta.note,
+      min: meta.min,
+    };
+    day += count;
+    return stay;
+  });
+
+  const transitAreas = ['naivasha', 'nakuru', 'nairobi', 'mtkenya'];
+  for (const stay of stays) {
+    if (stay.nights < stay.min && !transitAreas.includes(stay.key)) {
+      warnings.push(
+        `${stay.label} gets ${stay.nights} night${stay.nights === 1 ? '' : 's'}; the usual minimum is ${stay.min}.`
+      );
+    }
+    if (stay.nights >= 3 && ['naivasha', 'nakuru', 'nairobi'].includes(stay.key)) {
+      warnings.push(`${stay.nights} nights in ${stay.label} is more than most safaris need — it is a 1-night stop.`);
+    }
+  }
+
+  return { stays, warnings };
+}
+
+/* ---------------------------- room categories ---------------------------- */
+
+function rateMealPlan(option) {
+  const text = `${option.description || ''} ${option.label || ''}`;
+  if (/all[\s-]?inclusive/i.test(text)) return 'All inclusive';
+  if (/full[\s-]?board/i.test(text)) return 'Full board';
+  if (/half[\s-]?board/i.test(text)) return 'Half board';
+  if (/bed\s*(?:&|and)\s*breakfast|breakfast/i.test(text)) return 'Bed & breakfast';
+  return '';
+}
+
+// Words that describe how a rate is sold rather than a room type.
+const RATE_BASIS_WORDS =
+  /^(?:standard|room|rooms|twin|double|single|triple|quad|adult|adults|accommodation|basis|rate|only|net|per|person|night|and|or|with|of|the|a|resident|nonresident|sharing|share)$/;
+
+function rateRoomCategory(option) {
+  let text = String(option.description || '')
+    .split('|')[0]
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\bnon\s*[-–]?\s*package\b|\bpackage\b/gi, ' ')
+    .replace(/\b(high|low|mid|peak|shoulder|green|festive)\s*season\b/gi, ' ')
+    .replace(/\bseasons?\b/gi, ' ')
+    // Printed date bands ("3/1/2027 31/3/2027", "11 Jul 2027") name the season, not the room.
+    .replace(/\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b|\b20[2-3]\d\b/g, ' ')
+    .replace(/\b\d{1,2}\s*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*/gi, ' ')
+    .replace(/\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s*\d{1,2}\b/gi, ' ')
+    .replace(/:/g, ' ')
+    .replace(/\(cid:\s*\)/gi, ' ')
+    .replace(/\b(?:us\$|usd|kes|ksh|eur|gbp)\b/gi, ' ')
+    .replace(/\bper\s+person\s*(?:\/|per)?\s*night\b/gi, ' ')
+    .replace(/\bper\s+person\b|\bpppn\b|\bpp\b/gi, ' ')
+    .replace(/\bper\s+(?:room|suite|tent|villa|cabin)\s*(?:\/|per)?\s*night\b/gi, ' ')
+    .replace(/\bper\s+night\b/gi, ' ')
+    .replace(/[–—-]\s*(?:full|half)\s*board\b/gi, ' ')
+    .replace(/\bbed\s*(?:&|and)\s*breakfast\b/gi, ' ')
+    .replace(/\b(?:full|half)\s*board\b|\bbook\s*&\s*breakfast\b/gi, ' ')
+    .replace(/\ball[\s-]?inclusive\b|\bbreakfast\b/gi, ' ')
+    .replace(/^[\s—–\-|/]+/, '')
+    .replace(/[\s—–\-|/]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  text = text.replace(/[\s&,;:-]+$/g, '').trim();
+  if (/years sharing|own room|with parents|sharing room|\bcid\b/i.test(text)) text = '';
+  if (
+    !text ||
+    /^(?:\d{1,2}\s*[–—-]\s*\d{1,2}|\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*)$/i.test(text)
+  ) {
+    return 'Standard room';
+  }
+  text = text.replace(/^(?:rate|option\s*\d+)$/i, 'Standard room');
+
+  // "Sharing", "Twin sharing", "Single" are how the rate is sold, not what the room is.
+  // Quote them as a standard room with its occupancy; keep real room names intact.
+  const sharing = /\b(?:sharing|share|pps|p\.?\s?p\.?\s?s)\b/i.test(text);
+  const single = /\b(?:single|sole\s+occupancy|srs)\b/i.test(text);
+  let name = text
+    .replace(/\b(?:twin|double|triple|quad)\s*(?:room\s*)?sharing\b/gi, ' ')
+    .replace(/\b(?:adults?\s*)?sharing\s*(?:basis|rate)?\b/gi, ' ')
+    .replace(/\bpps\b|\bp\.?\s?p\.?\s?s\b/gi, ' ')
+    .replace(/\b(?:sharing|single|sole\s+occupancy|srs)\b/gi, ' ')
+    .replace(/\bnon[-\s]?resident\b|\bresident\b/gi, ' ')
+    .replace(/[\s—–\-|/,&+]+/g, ' ')
+    .replace(/\bgame\s*$/i, ' ')
+    .trim();
+  // A bare number is an unparsed column, not a room.
+  if (/^[\d\s.,/–—-]+$/.test(name)) name = '';
+  const generic =
+    !name ||
+    name
+      .split(/[\s/&,]+/)
+      .filter(Boolean)
+      .every((word) => RATE_BASIS_WORDS.test(word.replace(/[^a-z]/gi, '').toLowerCase()));
+  if (generic) {
+    if (sharing) return 'Standard room sharing';
+    if (single) return 'Standard room single';
+    if (/^(?:twin|double)\s+room$/i.test(name)) return name.charAt(0).toUpperCase() + name.slice(1);
+    return 'Standard room';
+  }
+  // Drop table numbering ("3.") and cut on a word so a long property name stays readable.
+  const cleaned = name.replace(/^\d+\.\s*/, '');
+  const short = cleaned.length > 42 ? cleaned.slice(0, 42).replace(/\s+\S*$/, '') : cleaned;
+  return short.charAt(0).toUpperCase() + short.slice(1);
+}
+
+function tierForNightly(perPersonNight, currency) {
+  const usd = convertCurrency(perPersonNight, currency || 'USD', 'USD');
+  if (usd < FRAMEWORK_TIERS.midrange.low) return 'budget';
+  if (usd <= FRAMEWORK_TIERS.midrange.high) return 'midrange';
+  return 'luxury';
+}
+
+// Whole-unit categories are sold per unit, not per person, so they are kept out of
+// the per-person framework maths (agencies can still open them in the rate library).
+const UNIT_ONLY_RE = /penthouse|\bbedroom\b|\d\s*br\b|\bhouse\b|\bentire\b|whole villa/i;
+
+function profileHotel(hotel, quote) {
+  // Agencies quote adults sharing; child rates stay on the contract page.
+  const pax = Math.max(1, Math.round(num(quote.adults, 2)));
+  const seen = new Map();
+  for (const option of hotel.options) {
+    const name = rateRoomCategory(option);
+    const meal = rateMealPlan(option);
+    if (UNIT_ONLY_RE.test(name)) continue;
+    const seasons = option.seasons || (option.season ? [option.season] : []);
+    const perPersonNight = option.partyNightly / pax;
+    // One category per room + meal + season + price, so two columns at the same
+    // price collapse but a genuinely different season rate stays selectable.
+    const key = `${name.toLowerCase()}|${meal.toLowerCase()}|${seasons.join(',')}|${Math.round(perPersonNight)}`;
+    if (seen.has(key)) continue;
+    seen.set(key, {
+      key,
+      name,
+      meal,
+      season: seasons[0] || '',
+      seasons,
+      seasonLabel: option.seasonLabel || '',
+      columnLabel: option.columnLabel || '',
+      perPersonNight,
+      fileName: option.fileName,
+    });
+  }
+  const categories = Array.from(seen.values()).sort((a, b) => a.perPersonNight - b.perPersonNight);
+  const lowest = categories[0] || null;
+  const perPersonNight = lowest ? lowest.perPersonNight : 0;
+  return {
+    ...hotel,
+    categories,
+    perPersonNight,
+    tier: tierForNightly(perPersonNight, quote.currency),
+  };
+}
+
+function pickHotelForTier(hotels, tierKey) {
+  if (!hotels.length) return null;
+  const band = FRAMEWORK_TIERS[tierKey];
+  const exact = hotels.filter((hotel) => hotel.tier === tierKey);
+  if (exact.length) {
+    const sorted = exact.slice().sort((a, b) => a.perPersonNight - b.perPersonNight);
+    return sorted[Math.floor((sorted.length - 1) / 2)];
+  }
+  const distance = (hotel) => {
+    if (hotel.perPersonNight < band.low) return band.low - hotel.perPersonNight;
+    if (hotel.perPersonNight > band.high) return hotel.perPersonNight - band.high;
+    return 0;
+  };
+  return hotels.slice().sort((a, b) => distance(a) - distance(b) || a.perPersonNight - b.perPersonNight)[0];
+}
+
+// Narrow each hotel to the requested season's categories. Hotels with no rate for
+// that season are dropped, so the caller can price from what the contract actually has.
+function seasonalPool(hotels, season, currency) {
+  if (!season) return { pool: hotels, missing: [] };
+  const pool = [];
+  const missing = [];
+  for (const hotel of hotels) {
+    const categories = hotel.categories.filter((category) =>
+      (category.seasons || (category.season ? [category.season] : [])).includes(season)
+    );
+    if (!categories.length) {
+      missing.push(hotel.name);
+      continue;
+    }
+    pool.push({
+      ...hotel,
+      categories,
+      perPersonNight: categories[0].perPersonNight,
+      tier: tierForNightly(categories[0].perPersonNight, currency),
+    });
+  }
+  return { pool, missing };
+}
+
+function assembleFramework({ stays, hotelsByArea, tier, budget, quote, warnings, season }) {
+  // Quote adults sharing; child rates are taken from the contract by hand.
+  const pax = Math.max(1, Math.round(num(quote.adults, 2)));
+  const children = Math.max(0, Math.round(num(quote.children, 0)));
+  if (children) {
+    warnings.push(
+      `${children} child${children === 1 ? '' : 'ren'} travelling: child rates are not included in these totals — take them from the same contract page.`
+    );
+  }
+  const nightsTotal = stays.reduce((sum, stay) => sum + stay.nights, 0);
+  const collect = (tierKey) =>
+    stays.map((stay) => {
+      const all = hotelsByArea.get(stay.key) || [];
+      const seasonal = seasonalPool(all, season, quote.currency);
+      const pool = seasonal.pool.length ? seasonal.pool : all;
+      const hotel = pickHotelForTier(pool, tierKey);
+      const category = hotel && hotel.categories.length ? hotel.categories[0] : null;
+      return {
+        stay,
+        hotel,
+        category,
+        // When the contract prints no column for the chosen season we still show a
+        // price, but the stay says which column it came from instead of pretending.
+        seasonFallback: Boolean(season) && !seasonal.pool.length,
+        alternatives: pool.filter((item) => item !== hotel).slice(0, 4),
+        subtotal: category ? category.perPersonNight * pax * stay.nights : 0,
+      };
+    });
+
+  let chosenTier = tier;
+  let picks = collect(chosenTier);
+  let total = picks.reduce((sum, pick) => sum + pick.subtotal, 0);
+
+  if (budget) {
+    const down = { luxury: 'midrange', midrange: 'budget', budget: null };
+    while (total > budget && down[chosenTier]) {
+      const nextTier = down[chosenTier];
+      warnings.push(
+        `${FRAMEWORK_TIERS[chosenTier].label} hotels come to ${fmtMoney(total, quote.currency)} — stepping down to ${
+          FRAMEWORK_TIERS[nextTier].label
+        } to hold the cap.`
+      );
+      chosenTier = nextTier;
+      picks = collect(chosenTier);
+      total = picks.reduce((sum, pick) => sum + pick.subtotal, 0);
+    }
+    if (total > budget) {
+      return {
+        ok: false,
+        reason: 'too-low',
+        warnings,
+        picks,
+        stays,
+        tier: chosenTier,
+        nightsTotal,
+        pax,
+        message: `Even the budget hotels come to ${fmtMoney(total, quote.currency)} for ${nightsTotal} nights (${fmtMoney(
+          total / pax,
+          quote.currency
+        )} per person). Raise the cap, shorten the trip, or drop an area.`,
+      };
+    }
+  }
+
+  const missing = picks.filter((pick) => !pick.hotel).map((pick) => pick.stay.label);
+  if (missing.length) {
+    warnings.push(`No readable contract rate for ${missing.join(', ')} — add those nights from the rate library.`);
+  }
+
+  if (season) {
+    const label = FRAMEWORK_SEASONS[season].label.toLowerCase();
+    for (const pick of picks) {
+      if (!pick.hotel || !pick.seasonFallback) continue;
+      const column = pick.category ? pick.category.columnLabel : 'another column';
+      warnings.push(
+        `${pick.hotel.name} prints no ${label} column — priced from ${column} instead. Check the dates on the contract.`
+      );
+    }
+  }
+
+  const achieved = picks.filter((pick) => pick.hotel).map((pick) => pick.hotel.tier);
+  const effectiveTier =
+    achieved.length && achieved.every((value) => value === achieved[0]) ? achieved[0] : 'mixed';
+  if (effectiveTier === 'mixed') {
+    warnings.push(
+      `The ${FRAMEWORK_TIERS[chosenTier].label} contracts on file do not line up across every area — this framework mixes tiers; adjust room categories per stay.`
+    );
+  } else if (effectiveTier !== chosenTier) {
+    warnings.push(
+      `No ${FRAMEWORK_TIERS[chosenTier].label} contract was readable in every area, so the closest available ${FRAMEWORK_TIERS[effectiveTier].label} hotels are shown.`
+    );
+  }
+
+  return {
+    ok: true,
+    stays,
+    picks,
+    tier: chosenTier,
+    effectiveTier,
+    season: season || '',
+    route: stays.map((stay) => stay.label),
+    budget: budget || 0,
+    nightsTotal,
+    pax,
+    total,
+    perPerson: total / pax,
+    perNight: nightsTotal ? total / nightsTotal : 0,
+    warnings,
+  };
+}
+
+/* ------------------------------- UI state -------------------------------- */
+
+function populateAreaChips() {
+  if (!dom.frameworkAreaChips) return;
+  const counts = new Map();
+  for (const supplier of inventory.suppliers || []) {
+    if (!(supplier.files || []).some(isExtractable)) continue;
+    const area = detectSupplierArea(supplier);
+    counts.set(area.key, (counts.get(area.key) || 0) + 1);
+  }
+  dom.frameworkAreaChips.innerHTML = AREA_CATALOG.filter((area) => AREA_FRAMEWORK[area.key])
+    .map((area) => {
+      const meta = areaMeta(area.key);
+      const selected = frameworkState.areas.has(area.key);
+      const count = counts.get(area.key) || 0;
+      return `<button class="area-chip ${selected ? 'is-selected' : ''}" type="button" data-area="${escapeHtml(
+        area.key
+      )}" aria-pressed="${selected}">
+        <span>${escapeHtml(area.label)}</span>
+        <em>${meta.min}–${meta.max} nights${count ? ` · ${count} hotel${count === 1 ? '' : 's'}` : ''}</em>
+      </button>`;
+    })
+    .join('');
+  updateFrameworkPills();
+}
+
+function updateFrameworkPills() {
+  if (dom.frameworkNightPill) {
+    dom.frameworkNightPill.textContent = String(
+      clamp(Math.round(num(dom.frameworkDays && dom.frameworkDays.value, 1)), 1, 30)
+    );
+  }
+  if (dom.frameworkAreaPill) dom.frameworkAreaPill.textContent = String(frameworkState.areas.size);
+  if (dom.frameworkAreaHint) {
+    const areas = Array.from(frameworkState.areas).map((key) => areaMeta(key));
+    const minimum = areas.reduce((sum, meta) => sum + meta.min, 0);
+    const days = clamp(Math.round(num(dom.frameworkDays && dom.frameworkDays.value, 1)), 1, 30);
+    dom.frameworkAreaHint.textContent = !areas.length
+      ? 'Pick the areas the clients want, or let the framework suggest them for the nights you entered.'
+      : minimum > days
+        ? `${areas.length} areas need at least ${minimum} nights together; ${days} will trim the circuit.`
+        : `${areas.length} area${areas.length === 1 ? '' : 's'} · ${minimum} nights minimum · nights are allocated by what each area deserves.`;
+  }
+}
+
+function initFrameworkAreas(quote) {
+  if (frameworkState.areas.size) return;
+  const fromStops = (quote.stops || [])
+    .map((stop) => detectAreaFromText(stop.location))
+    .filter(Boolean)
+    .map((area) => area.key);
+  const days = clamp(Math.round(num(quote.tripDays, 1)) || 1, 1, 30);
+  const keys = fromStops.length ? fromStops : suggestAreas(days);
+  for (const key of keys) frameworkState.areas.add(key);
+}
+
+function toggleFrameworkArea(key) {
+  if (!AREA_FRAMEWORK[key]) return;
+  if (frameworkState.areas.has(key)) frameworkState.areas.delete(key);
+  else frameworkState.areas.add(key);
+  populateAreaChips();
+}
+
+function setFrameworkBusy(busy) {
+  frameworkState.busy = busy;
+  dom.frameworkBuildBtn.disabled = busy || !serverOnline;
+  dom.frameworkBuildBtn.textContent = busy ? 'Reading contracts…' : 'Build framework';
+  dom.frameworkStatus.classList.toggle('hidden', !busy);
+  if (dom.frameworkPlanner) dom.frameworkPlanner.classList.toggle('is-busy', busy);
+}
+
+function setFrameworkStatus(text) {
+  dom.frameworkStatusText.textContent = text;
+  dom.frameworkStatus.classList.remove('hidden');
+}
+
+/* ------------------------------- build ----------------------------------- */
+
+async function buildFramework() {
+  const quote = activeQuote();
+  if (frameworkState.busy) return;
+  if (!serverOnline) {
+    toast('Start the local server to read contract rates: python3 server.py', 'error');
+    return;
+  }
+
+  const days = clamp(Math.round(num(dom.frameworkDays.value, quote.tripDays || 1)), 1, 30);
+  dom.frameworkDays.value = days;
+  const tier = FRAMEWORK_TIERS[dom.frameworkTier.value] ? dom.frameworkTier.value : 'midrange';
+  const budget = Math.max(0, num(dom.frameworkBudget.value, 0));
+  const season = FRAMEWORK_SEASONS[dom.frameworkSeason.value] ? dom.frameworkSeason.value : '';
+  const keys = Array.from(frameworkState.areas);
+
+  if (!keys.length) {
+    toast('Choose the areas the clients want to visit.', 'error');
+    return;
+  }
+
+  const allocation = allocateNights(days, keys);
+  if (!allocation.stays.length) {
+    toast('Choose at least one area.', 'error');
+    return;
+  }
+
+  // Sample across each area's contract list so budget and luxury names both get a chance,
+  // then read further down the list for areas where the wanted tier is missing.
+  const areaStates = allocation.stays.map((stay) => ({
+    stay,
+    pool: (inventory.suppliers || [])
+      .filter((supplier) => detectSupplierArea(supplier).key === stay.key)
+      .filter((supplier) => (supplier.files || []).some(isExtractable)),
+    used: new Set(),
+    hotels: [],
+  }));
+
+  const entriesFor = (state, count) => {
+    const remaining = state.pool.filter((supplier) => !state.used.has(supplier.id || supplier.name));
+    const entries = [];
+    for (const supplier of sampleEvery(remaining, count)) {
+      state.used.add(supplier.id || supplier.name);
+      const files = rateFileCandidates(supplier, quote.residency);
+      if (!files.length) continue;
+      entries.push({ supplier, area: { key: state.stay.key, label: state.stay.label }, paths: [files[0].path] });
+    }
+    return entries;
+  };
+
+  const readInto = async (entries) => {
+    if (!entries.length) return;
+    const hotels = await readHotelRates(entries, quote);
+    for (const hotel of hotels) {
+      const profile = profileHotel(hotel, quote);
+      if (!profile.categories.length) continue;
+      const state = areaStates.find((item) => item.stay.key === hotel.area.key);
+      if (state) state.hotels.push(profile);
+    }
+  };
+
+  const firstPass = areaStates.flatMap((state) => entriesFor(state, 5));
+  if (!firstPass.length) {
+    toast('No extractable rate contracts were found for those areas.', 'error');
+    return;
+  }
+
+  setFrameworkBusy(true);
+  setFrameworkStatus(
+    `Reading net rates for ${firstPass.length} hotel${firstPass.length === 1 ? '' : 's'} across ${
+      allocation.stays.length
+    } area${allocation.stays.length === 1 ? '' : 's'}…`
+  );
+
+  try {
+    await readInto(firstPass);
+
+    const secondPass = areaStates
+      .filter((state) => {
+        const seasonal = seasonalPool(state.hotels, season, quote.currency);
+        const pool = seasonal.pool.length ? seasonal.pool : state.hotels;
+        return !pool.some((hotel) => hotel.tier === tier);
+      })
+      .flatMap((state) => entriesFor(state, 5));
+    if (secondPass.length) {
+      setFrameworkStatus(
+        `No ${FRAMEWORK_TIERS[tier].label} hotel yet — reading ${secondPass.length} more contract${
+          secondPass.length === 1 ? '' : 's'
+        }…`
+      );
+      await readInto(secondPass);
+    }
+
+    const hotelsByArea = new Map(areaStates.map((state) => [state.stay.key, state.hotels]));
+
+    const plan = assembleFramework({
+      stays: allocation.stays,
+      hotelsByArea,
+      tier,
+      budget,
+      quote,
+      season,
+      warnings: allocation.warnings.slice(),
+    });
+
+    frameworkState.plan = plan;
+    renderFrameworkPlan();
+    if (!plan.ok) toast(plan.message, 'error');
+  } catch (error) {
+    toast(`Could not build the framework: ${error.message}`, 'error');
+  } finally {
+    setFrameworkBusy(false);
+  }
+}
+
+/* ------------------------------- render ---------------------------------- */
+
+function frameworkCategoryChips(pick, quote) {
+  const pax = Math.max(1, num(quote.adults, 2) + num(quote.children, 0));
+  return pick.hotel.categories
+    .slice(0, 6)
+    .map((category) => {
+      const party = category.perPersonNight * pax;
+      const isCurrent = pick.category && category.key === pick.category.key;
+      return `<li class="${isCurrent ? 'is-current' : ''}">
+        <span>${escapeHtml(category.name)}${category.meal ? ` · ${escapeHtml(category.meal)}` : ''}${
+          category.seasonLabel ? ` · ${escapeHtml(category.seasonLabel)}` : ''
+        }</span>
+        <strong>${fmtMoney(category.perPersonNight, quote.currency)}<em>pp</em></strong>
+        <em>${fmtMoney(party, quote.currency)}/night</em>
+      </li>`;
+    })
+    .join('');
+}
+
+function renderFrameworkPlan() {
+  const plan = frameworkState.plan;
+  const quote = activeQuote();
+  if (!plan) {
+    dom.frameworkResult.classList.add('hidden');
+    dom.frameworkResult.innerHTML = '';
+    return;
+  }
+  dom.frameworkResult.classList.remove('hidden');
+
+  if (!plan.ok) {
+    const rates = plan.picks
+      .filter((pick) => pick.hotel)
+      .map(
+        (pick) =>
+          `<li><strong>${escapeHtml(pick.hotel.name)}</strong> — ${fmtMoney(
+            pick.hotel.perPersonNight,
+            quote.currency
+          )} per person / night · ${escapeHtml(pick.stay.label)}</li>`
+      )
+      .join('');
+    const notes = (plan.warnings || []).map((note) => `<li>${escapeHtml(note)}</li>`).join('');
+    dom.frameworkResult.innerHTML = `
+      <div class="plan-note is-warning">
+        <strong>No framework fits that cap.</strong>
+        <p>${escapeHtml(plan.message || 'Adjust the nights, areas or tier.')}</p>
+        ${rates ? `<ul class="plan-rate-list">${rates}</ul>` : ''}
+        ${notes ? `<ul class="plan-notes">${notes}</ul>` : ''}
+      </div>`;
+    return;
+  }
+
+  const tierInfo = FRAMEWORK_TIERS[plan.effectiveTier === 'mixed' ? plan.tier : plan.effectiveTier || plan.tier];
+  const requestedLabel = FRAMEWORK_TIERS[plan.tier] ? FRAMEWORK_TIERS[plan.tier].label : '';
+  const cover = plan.budget ? Math.min(100, Math.round((plan.total / plan.budget) * 100)) : 0;
+
+  const stays = plan.picks
+    .map((pick, index) => {
+      const dayLabel = pick.stay.from === pick.stay.to ? `Day ${pick.stay.from}` : `Days ${pick.stay.from}–${pick.stay.to}`;
+      const categoryLabel = pick.category
+        ? `${escapeHtml(pick.category.name)}${pick.category.meal ? ` · ${escapeHtml(pick.category.meal)}` : ''}${
+            pick.category.seasonLabel ? ` · ${escapeHtml(pick.category.seasonLabel)}` : ''
+          }`
+        : 'Rate on request';
+      const seasonNote = pick.category
+        ? `<span class="stay-season${pick.seasonFallback ? ' is-fallback' : ''}">Priced from ${escapeHtml(
+            pick.category.columnLabel || pick.category.seasonLabel || 'column 1'
+          )}${
+            pick.seasonFallback && plan.season
+              ? ` — no ${escapeHtml(FRAMEWORK_SEASONS[plan.season].label.toLowerCase())} column on this contract`
+              : ''
+          }</span>`
+        : '';
+      const options = pick.hotel
+        ? pick.hotel.categories
+            .map(
+              (category) =>
+                `<option value="${escapeHtml(category.key || '')}" ${
+                  pick.category && category.key === pick.category.key ? 'selected' : ''
+                }>${escapeHtml(category.name)}${category.meal ? ` · ${escapeHtml(category.meal)}` : ''}${
+                  category.seasonLabel ? ` · ${escapeHtml(category.seasonLabel)}` : ''
+                } — ${fmtMoney(category.perPersonNight, quote.currency)} pp</option>`
+            )
+            .join('')
+        : '';
+      return `
+        <article class="framework-stay">
+          <div class="stay-days">
+            <strong>${escapeHtml(dayLabel)}</strong>
+            <span>${pick.stay.nights} night${pick.stay.nights === 1 ? '' : 's'}</span>
+          </div>
+          <div class="stay-body">
+            <div class="stay-head">
+              <div>
+                <h4>${escapeHtml(pick.stay.label)}</h4>
+                <p class="plan-muted">${escapeHtml(pick.stay.transfer)}</p>
+              </div>
+              <span class="area-badge">${escapeHtml(pick.hotel ? pick.hotel.tier : 'no rate')}</span>
+            </div>
+            <p class="stay-note">${escapeHtml(pick.stay.note)}</p>
+            ${
+              pick.hotel
+                ? `<div class="stay-hotel">
+                    <div class="stay-hotel-main">
+                      <strong>${escapeHtml(pick.hotel.name)}</strong>
+                      <span class="plan-muted">${escapeHtml(categoryLabel)} · ${fmtMoney(
+                        pick.category.perPersonNight,
+                        quote.currency
+                      )} per person / night</span>
+                      ${seasonNote}
+                    </div>
+                    <div class="stay-hotel-side">
+                      <strong>${fmtMoney(pick.subtotal, quote.currency)}</strong>
+                      <button class="mini-btn" type="button" data-plan-library="${index}" title="Open the contract">Rates</button>
+                    </div>
+                    ${
+                      pick.hotel.categories.length > 1
+                        ? `<label class="category-picker">
+                            <span>Room category</span>
+                            <select data-category-select="${index}">${options}</select>
+                          </label>`
+                        : ''
+                    }
+                    <ul class="plan-rate-chips">${frameworkCategoryChips(pick, quote)}</ul>
+                    ${
+                      pick.alternatives && pick.alternatives.length
+                        ? `<div class="stay-alternatives">
+                            <span>Also read in ${escapeHtml(pick.stay.label)}</span>
+                            <ul>${pick.alternatives
+                              .map(
+                                (alt) =>
+                                  `<li><span>${escapeHtml(alt.name)}</span><strong>${fmtMoney(
+                                    alt.perPersonNight,
+                                    quote.currency
+                                  )} pp</strong><em>${escapeHtml(alt.tier)}</em></li>`
+                              )
+                              .join('')}</ul>
+                          </div>`
+                        : ''
+                    }
+                  </div>`
+                : `<p class="plan-flag">No readable contract rate for ${escapeHtml(pick.stay.label)} — open the rate library.</p>`
+            }
+          </div>
+        </article>`;
+    })
+    .join('');
+
+  const notes = (plan.warnings || []).map((note) => `<li>${escapeHtml(note)}</li>`).join('');
+
+  dom.frameworkResult.innerHTML = `
+    <div class="plan-summary">
+      <div class="plan-total">
+        <span class="plan-muted">Net accommodation · ${escapeHtml(tierInfo.label)}${
+          plan.effectiveTier && plan.effectiveTier !== 'mixed' && plan.effectiveTier !== plan.tier
+            ? ` (requested ${escapeHtml(requestedLabel)})`
+            : ''
+        } · ${plan.nightsTotal} nights</span>
+        <strong>${fmtAmount(plan.total)}</strong>
+        ${
+          plan.budget
+            ? `<div class="plan-budget-bar"><i style="width:${cover}%"></i></div>
+               <span class="plan-muted">${cover}% of ${fmtMoney(plan.budget, quote.currency)} · ${fmtMoney(
+                 Math.max(0, plan.budget - plan.total),
+                 quote.currency
+               )} left</span>`
+            : ''
+        }
+        <span class="plan-muted">${fmtMoney(plan.perPerson, quote.currency)} per person · ${fmtMoney(
+          plan.perNight,
+          quote.currency
+        )} per night for the party · ${plan.pax} adult${plan.pax === 1 ? '' : 's'} sharing</span>
+      </div>
+      <div class="plan-badges">
+        <span class="planner-pill"><strong>${plan.nightsTotal}</strong> nights</span>
+        <span class="planner-pill"><strong>${plan.stays.length}</strong> areas</span>
+        <span class="planner-pill">${escapeHtml(tierInfo.label)}</span>
+        ${
+          plan.season
+            ? `<span class="planner-pill" title="${escapeHtml(
+                FRAMEWORK_SEASONS[plan.season].hint
+              )}">${escapeHtml(FRAMEWORK_SEASONS[plan.season].label)}</span>`
+            : ''
+        }
+      </div>
+    </div>
+    <p class="framework-route">Circuit: ${plan.route.map((label) => escapeHtml(label)).join(' → ')}</p>
+    <p class="plan-muted framework-band">${escapeHtml(tierInfo.blurb)} Tier band: ${
+      tierInfo.high === Infinity
+        ? `from ${fmtMoney(tierInfo.low, 'USD')} per person / night`
+        : `${fmtMoney(tierInfo.low, 'USD')}–${fmtMoney(tierInfo.high, 'USD')} per person / night`
+    }.</p>
+    <div class="framework-stays">${stays}</div>
+    ${notes ? `<ul class="plan-notes">${notes}</ul>` : ''}
+    <div class="framework-actions">
+      <button class="btn btn-primary" type="button" data-framework-apply="1">Use this framework</button>
+      <span class="plan-muted">Net contract rates from the PDFs. Transfers, park fees and flights are not included; your quote markup is applied on top.</span>
+    </div>`;
+}
+
+function selectFrameworkCategory(index, value) {
+  const plan = frameworkState.plan;
+  if (!plan || !plan.ok) return;
+  const pick = plan.picks[index];
+  if (!pick || !pick.hotel) return;
+  const category = pick.hotel.categories.find((item) => item.key === String(value));
+  if (!category) return;
+  pick.category = category;
+  pick.subtotal = category.perPersonNight * plan.pax * pick.stay.nights;
+  plan.total = plan.picks.reduce((sum, item) => sum + item.subtotal, 0);
+  plan.perPerson = plan.total / plan.pax;
+  plan.perNight = plan.nightsTotal ? plan.total / plan.nightsTotal : 0;
+  const achieved = plan.picks.filter((item) => item.hotel).map((item) => item.hotel.tier);
+  plan.effectiveTier =
+    achieved.length && achieved.every((value) => value === achieved[0]) ? achieved[0] : 'mixed';
+  renderFrameworkPlan();
+}
+
+function applyFrameworkPlan() {
+  const plan = frameworkState.plan;
+  if (!plan || !plan.ok) return;
+  const quote = activeQuote();
+  if (quote.lines.length && !confirm('Replace the current itinerary lines with this framework?')) return;
+
+  const adults = Math.max(1, Math.round(num(quote.adults, 2)));
+  const children = Math.max(0, Math.round(num(quote.children, 0)));
+  quote.stops = plan.stays.map((stay) => createStop(stay.label, stay.nights));
+  quote.tripDays = Math.max(1, plan.nightsTotal);
+  if (quote.startDate) {
+    const start = new Date(`${quote.startDate}T00:00:00`);
+    if (!Number.isNaN(start.getTime())) {
+      start.setDate(start.getDate() + quote.tripDays);
+      quote.endDate = start.toISOString().slice(0, 10);
+    }
+  }
+  quote.lines = plan.picks
+    .filter((pick) => pick.hotel && pick.category)
+    .map((pick) => ({
+      id: uid('line'),
+      supplier: pick.hotel.name,
+      // The category already says "sharing" where the contract sells it that way.
+      description: `${pick.stay.label} — ${pick.hotel.name} · ${pick.category.name}${
+        pick.category.meal ? `, ${pick.category.meal.toLowerCase()}` : ''
+      } · ${pick.stay.nights} night${pick.stay.nights === 1 ? '' : 's'}${
+        /shar/i.test(pick.category.name) ? '' : ', per person sharing'
+      }`,
+      basis: 'per_person_night',
+      rate: Math.round(pick.category.perPersonNight * 100) / 100,
+      currency: quote.currency,
+      units: adults,
+      nights: pick.stay.nights,
+      markup: null,
+      season: [pick.category.seasonLabel, pick.category.meal].filter(Boolean).join(' · '),
+      notes: `Net ${fmtMoney(pick.category.perPersonNight, quote.currency)} pp/night · ${adults} adult${
+        adults === 1 ? '' : 's'
+      } sharing${children ? ` · ${children} child${children === 1 ? '' : 'ren'} quoted separately` : ''}`,
+      source: pick.category.fileName || pick.hotel.fileName || '',
+    }));
+
+  activeStopId = quote.stops.length ? quote.stops[0].id : null;
+  touchQuote(quote);
+  saveState(true);
+  renderAll();
+  toast(`Framework applied: ${plan.nightsTotal} nights, ${fmtMoney(plan.total, quote.currency)} net.`);
 }
 
 function unitsText(line, calc) {
@@ -1309,6 +2678,7 @@ function renderSuppliers({ resetScroll = false } = {}) {
   if (!dom.supplierList) return;
   const query = dom.rateSearch.value.trim().toLowerCase();
   const filter = dom.rateExtFilter.value;
+  const locationKey = dom.rateLocationFilter ? dom.rateLocationFilter.value : 'all';
   const previousScroll = resetScroll ? 0 : dom.supplierList.scrollTop;
 
   if (!inventory || !Array.isArray(inventory.suppliers) || !inventory.suppliers.length) {
@@ -1318,47 +2688,66 @@ function renderSuppliers({ resetScroll = false } = {}) {
   }
 
   let html = '';
-  inventory.suppliers.forEach((supplier, supplierIndex) => {
-    const files = Array.isArray(supplier.files) ? supplier.files : [];
-    const filteredFiles = files
-      .map((file, fileIndex) => ({ file, fileIndex }))
-      .filter(({ file }) => matchesRateFilter(file, filter));
-    if (!filteredFiles.length) return;
+  let visibleHotels = 0;
 
-    const supplierMatches = supplier.name.toLowerCase().includes(query);
-    const visibleFiles = query
-      ? supplierMatches
-        ? filteredFiles
-        : filteredFiles.filter(({ file }) => file.name.toLowerCase().includes(query))
-      : filteredFiles;
-    if (!visibleFiles.length) return;
+  for (const group of groupedSuppliers()) {
+    if (locationKey !== 'all' && group.key !== locationKey) continue;
 
-    const isActiveSupplier = activeFile && activeFile.supplier === supplier.name;
-    const open = Boolean(query) || isActiveSupplier;
-    html += `<details class="supplier" data-supplier-index="${supplierIndex}" ${open ? 'open' : ''}>
-      <summary title="${escapeHtml(supplier.name)}">
-        <span class="supplier-name">${escapeHtml(supplier.name)}</span>
-        <span class="supplier-count">${files.length}</span>
-      </summary>
-      <div class="file-list">`;
+    let groupHtml = '';
+    for (const { supplier, index: supplierIndex } of group.hotels) {
+      const files = Array.isArray(supplier.files) ? supplier.files : [];
+      const filteredFiles = files
+        .map((file, fileIndex) => ({ file, fileIndex }))
+        .filter(({ file }) => matchesRateFilter(file, filter));
+      if (!filteredFiles.length) continue;
 
-    for (const { file, fileIndex } of visibleFiles) {
-      const active = activeFile && activeFile.file.path === file.path;
-      html += `<button class="file-item ${active ? 'is-active' : ''}" type="button"
-          data-supplier-index="${supplierIndex}" data-file-index="${fileIndex}"
-          title="${escapeHtml(file.name)}">
-        <span class="ext-badge ${extClass(file)}">${escapeHtml(fileExt(file) || 'file')}</span>
-        <span class="file-copy">
-          <span class="file-name">${escapeHtml(file.name)}</span>
-          <span class="file-size">${formatSize(file.size)}</span>
-        </span>
-      </button>`;
+      const supplierMatches = supplier.name.toLowerCase().includes(query);
+      const visibleFiles = query
+        ? supplierMatches
+          ? filteredFiles
+          : filteredFiles.filter(({ file }) => file.name.toLowerCase().includes(query))
+        : filteredFiles;
+      if (!visibleFiles.length) continue;
+
+      const isActiveSupplier = activeFile && activeFile.supplier === supplier.name;
+      const open = Boolean(query) || isActiveSupplier;
+      visibleHotels += 1;
+      groupHtml += `<details class="supplier" data-supplier-index="${supplierIndex}" ${open ? 'open' : ''}>
+        <summary title="${escapeHtml(supplier.name)}">
+          <span class="supplier-name">${escapeHtml(supplier.name)}</span>
+          <span class="supplier-count">${files.length}</span>
+        </summary>
+        <div class="file-list">`;
+
+      for (const { file, fileIndex } of visibleFiles) {
+        const active = activeFile && activeFile.file.path === file.path;
+        groupHtml += `<button class="file-item ${active ? 'is-active' : ''}" type="button"
+            data-supplier-index="${supplierIndex}" data-file-index="${fileIndex}"
+            title="${escapeHtml(file.name)}">
+          <span class="ext-badge ${extClass(file)}">${escapeHtml(fileExt(file) || 'file')}</span>
+          <span class="file-copy">
+            <span class="file-name">${escapeHtml(file.name)}</span>
+            <span class="file-size">${formatSize(file.size)}</span>
+          </span>
+        </button>`;
+      }
+
+      groupHtml += '</div></details>';
     }
 
-    html += '</div></details>';
-  });
+    if (!groupHtml) continue;
+    html += `<section class="location-group" data-location="${escapeHtml(group.key)}">
+      <header class="location-head">
+        <span class="location-name">${escapeHtml(group.label)}</span>
+        <span class="location-count">${group.hotels.length} hotel${group.hotels.length === 1 ? '' : 's'}</span>
+      </header>
+      ${groupHtml}
+    </section>`;
+  }
 
-  dom.supplierList.innerHTML = html || '<div class="supplier-empty">No matching files.</div>';
+  dom.supplierList.innerHTML =
+    html ||
+    `<div class="supplier-empty">${visibleHotels ? 'No matching files.' : 'No hotels for this location yet. Sync the library or pick another location.'}</div>`;
   dom.supplierList.scrollTop = previousScroll;
 }
 
@@ -1388,6 +2777,7 @@ function openSupplierInRates(supplierId) {
   const supplier = inventory.suppliers[supplierIndex];
   dom.rateSearch.value = supplier.name;
   dom.rateExtFilter.value = 'all';
+  if (dom.rateLocationFilter) dom.rateLocationFilter.value = 'all';
   showView('rates');
   renderSuppliers({ resetScroll: true });
   const details = dom.supplierList.querySelector(`details[data-supplier-index="${supplierIndex}"]`);
@@ -1692,6 +3082,7 @@ function openCandidateModal(candidateId, amountIndex) {
 
   const quote = activeQuote();
   const basis = BASIS[candidate.unit] ? candidate.unit : 'per_person_night';
+  const definition = basisDefinition(basis);
   const label =
     (candidate.amountLabels && candidate.amountLabels[amountIndex]) ||
     (candidate.amounts.length > 1 ? `Option ${amountIndex + 1}` : '');
@@ -1709,7 +3100,7 @@ function openCandidateModal(candidateId, amountIndex) {
     rate: amount,
     currency: CURRENCIES.includes(candidate.currency) ? candidate.currency : quote.currency,
     units: defaultUnitsFor(basis, quote),
-    nights: defaultMultiplierFor(basis, quote),
+    nights: definition.multiplier === 'days' ? quoteDays(quote) : activeStopNights(quote),
     season,
     source: `${activeFile.file.name} · page ${candidate.page}`,
     notes: '',
@@ -2422,14 +3813,6 @@ function bindEvents() {
     saveState();
   });
 
-  dom.tripDays.addEventListener('input', () => {
-    const quote = activeQuote();
-    quote.tripDays = Math.max(1, Math.round(num(dom.tripDays.value, 1)));
-    touchQuote(quote);
-    renderPlanner();
-    saveState();
-  });
-
   dom.residency.addEventListener('change', () => {
     const quote = activeQuote();
     quote.residency = dom.residency.value === 'resident' ? 'resident' : 'non-resident';
@@ -2460,11 +3843,20 @@ function bindEvents() {
     const stop = quote.stops.find((item) => item.id === stopId);
     if (!stop) return;
     activeStopId = stopId;
-    if (field === 'location') stop.location = event.target.value;
+    if (field === 'location') {
+      stop.location = event.target.value;
+      // A place typed here should show up among the areas the clients want.
+      const area = detectAreaFromText(stop.location);
+      if (area && AREA_FRAMEWORK[area.key] && !frameworkState.areas.has(area.key)) {
+        frameworkState.areas.add(area.key);
+        populateAreaChips();
+      }
+    }
     if (field === 'nights') stop.nights = Math.max(1, Math.round(num(event.target.value, 1)));
     syncTripDays(quote);
     touchQuote(quote);
-    renderPlanner();
+    updatePlannerCounts(quote);
+    renderHotelMatches();
     saveState();
   });
 
@@ -2550,6 +3942,61 @@ function bindEvents() {
   });
 
   dom.rateExtFilter.addEventListener('change', () => renderSuppliers({ resetScroll: true }));
+  if (dom.rateLocationFilter) {
+    dom.rateLocationFilter.addEventListener('change', () => renderSuppliers({ resetScroll: true }));
+  }
+
+  dom.frameworkBuildBtn.addEventListener('click', buildFramework);
+  for (const id of ['frameworkDays', 'frameworkBudget']) {
+    dom[id].addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      buildFramework();
+    });
+  }
+  dom.frameworkDays.addEventListener('input', () => {
+    updateFrameworkPills();
+    if (dom.frameworkDays.value.trim() === '') return;
+    const quote = activeQuote();
+    quote.tripDays = clamp(Math.round(num(dom.frameworkDays.value, quote.tripDays)), 1, 30);
+    touchQuote(quote);
+    updatePlannerCounts(quote);
+    saveState();
+  });
+
+  dom.frameworkSeason.addEventListener('change', () => {
+    if (frameworkState.plan && frameworkState.plan.ok) buildFramework();
+  });
+  dom.frameworkSuggestBtn.addEventListener('click', () => {
+    const days = clamp(Math.round(num(dom.frameworkDays.value, 1)), 1, 30);
+    frameworkState.areas = new Set(suggestAreas(days));
+    populateAreaChips();
+  });
+  dom.frameworkAreaChips.addEventListener('click', (event) => {
+    const chip = event.target.closest('[data-area]');
+    if (!chip) return;
+    toggleFrameworkArea(chip.dataset.area);
+  });
+  dom.frameworkResult.addEventListener('click', (event) => {
+    if (event.target.closest('[data-framework-apply]')) {
+      applyFrameworkPlan();
+      return;
+    }
+    const button = event.target.closest('[data-plan-library]');
+    if (!button) return;
+    const plan = frameworkState.plan;
+    const pick = plan && plan.ok ? plan.picks[Number(button.dataset.planLibrary)] : null;
+    if (!pick || !pick.hotel) return;
+    const supplier = pick.hotel.supplier;
+    const fileName = (pick.category && pick.category.fileName) || pick.hotel.fileName;
+    const fileIndex = (supplier.files || []).findIndex((file) => file.name === fileName);
+    openSupplierFile(supplier.id, fileIndex >= 0 ? fileIndex : 0);
+  });
+  dom.frameworkResult.addEventListener('change', (event) => {
+    const select = event.target.closest('[data-category-select]');
+    if (!select) return;
+    selectFrameworkCategory(Number(select.dataset.categorySelect), select.value);
+  });
 
   dom.supplierList.addEventListener('click', (event) => {
     const button = event.target.closest('.file-item');

@@ -40,6 +40,8 @@ DATA_DIR = BASE_DIR / "data"
 CACHE_DIR = BASE_DIR / "cache"
 INVENTORY_JSON = DATA_DIR / "inventory.json"
 INVENTORY_JS = DATA_DIR / "inventory.js"
+# Bump when extraction logic changes so old cached results are not reused.
+EXTRACTION_VERSION = "2026-11-23.3"
 DEFAULT_SHARE_URL = (
     "https://1drv.ms/f/c/c6bd9a516690d040/"
     "IgCQLxHViUcZQrIw6ovUwuDUAS7stpyD4G113ctodZqgiKs?e=P9ao7Y"
@@ -478,15 +480,31 @@ PROSE_RE = re.compile(
     r"|per\s+adult\s+sharing\s+rate\s*:\s*min)",
     re.IGNORECASE,
 )
-SEASON_ORDER = {
-    "peak": 0,
-    "high": 1,
-    "shoulder": 2,
-    "standard": 3,
-    "low": 4,
-    "festive": 5,
-    "green": 6,
-}
+SEASON_WORD_RE = r"(?:mid|middle|peak|high|shoulder|standard|low|festive|green)"
+SEASON_MONTH_CODES = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+NUMERIC_DATE_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b")
+# Season headings as printed across the top of a rate table, e.g.
+# "LOW SEASON MID SEASON HIGH SEASON" or "HIGH SEASON MID & LOW SEASON".
+HEADER_SEASON_RE = re.compile(
+    rf"\b({SEASON_WORD_RE}(?:\s*(?:&|and|/)\s*{SEASON_WORD_RE})*\s*seasons?)\b",
+    re.IGNORECASE,
+)
+FEE_WORD_RE = re.compile(r"\b(?:conser\w*|conserv\w*|lev(?:y|ies)|fees?)\b", re.IGNORECASE)
+# Rows that open with the date band a contract prices (one band per row), e.g.
+# "High Season: (02 Jan–31 Mar 2027 …) 326 435 131" or "3/1/2027 31/3/2027 200 150".
+BAND_LEAD_RE = re.compile(
+    rf"^\s*(?:{SEASON_WORD_RE}\s*seasons?\b|\d{{1,2}}[./-]\d{{1,2}}[./-]\d{{2,4}})",
+    re.IGNORECASE,
+)
+# Words that label a rate table's occupancy columns ("PERIOD SINGLE DOUBLE THIRD BED",
+# "Per Person in twin", "Child(4-11) Sharing", "Executive Suite"). Headings wrap over
+# several lines, so they are collected word by word and keyed by x position.
+OCCUPANCY_WORD_RE = re.compile(
+    r"(single|double|twin|family|sharing|third|3rd|child|infant|per\b|person|adult"
+    r"|bed\b|room|suite|executive|standard|deluxe|superior|triple|occupancy|pax)",
+    re.IGNORECASE,
+)
+SEASON_ORDER = ("high", "shoulder", "low")
 SECTION_STOPWORDS = {
     "client",
     "clients",
@@ -554,6 +572,8 @@ UNIT_LABELS = {
     "per_vehicle_day": "Per vehicle / day",
     "per_night": "Per night",
     "per_day": "Per day",
+    "per_single_night": "Per single room / night",
+    "per_extra_person_night": "Per extra person / night",
 }
 CURRENCY_WORDS = [
     (re.compile(r"\bUSD\b|US\$|\bdollars?\b", re.I), "USD"),
@@ -648,12 +668,71 @@ def amounts_from_line(line: str) -> tuple[list[float], str, bool]:
     return numbers, currency, False
 
 
-def extract_rows_from_page(page: Any) -> list[str]:
+def season_header_blocks(page: Any) -> list[dict[str, Any]]:
+    """Season headings with their x positions, so column order is the printed order.
+
+    Rows are read top-to-bottom by the text extractor, but a rate table's column
+    order is left-to-right. Tawi prints "HIGH SEASON" above the table and
+    "MID SEASON  LOW SEASON" below it, while the actual columns are Mid, Low,
+    High — only the coordinates get that right.
+    """
+    try:
+        words = page.extract_words(x_tolerance=2, y_tolerance=2)
+    except Exception:
+        return []
+    season_words = [
+        word
+        for word in words
+        if re.fullmatch(SEASON_WORD_RE, str(word.get("text", "")).strip(" .,:();"), re.IGNORECASE)
+    ]
+    blocks: list[dict[str, Any]] = []
+    for word in sorted(season_words, key=lambda item: item.get("top", 0)):
+        top = float(word.get("top", 0))
+        block = next((item for item in blocks if abs(item["top"] - top) <= 3.5), None)
+        if block is None:
+            block = {"top": top, "columns": []}
+            blocks.append(block)
+        label = str(word.get("text", "")).strip(" .,:();")
+        suffix = next(
+            (
+                other
+                for other in words
+                if abs(float(other.get("top", 0)) - top) <= 2
+                and 0 <= float(other.get("x0", 0)) - float(word.get("x1", 0)) < 30
+                and re.fullmatch(r"seasons?", str(other.get("text", "")).strip(" .,:();"), re.IGNORECASE)
+            ),
+            None,
+        )
+        if suffix is not None:
+            label = f"{label} season"
+        block["columns"].append((float(word.get("x0", 0)), label))
+    return [block for block in blocks if block["columns"]]
+
+
+def merge_header_blocks(blocks: list[dict[str, Any]], top: float | None) -> list[str]:
+    """All season headings around one table header, left to right."""
+    if top is None:
+        return []
+    near = [block for block in blocks if abs(block["top"] - top) <= 18]
+    seen: set[tuple[int, str]] = set()
+    columns: list[tuple[float, str]] = []
+    for block in near:
+        for x, label in block["columns"]:
+            key = (round(x / 4), label.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            columns.append((x, label))
+    return [label for _, label in sorted(columns, key=lambda item: item[0])]
+
+
+def extract_rows_from_page(page: Any) -> tuple[list[str], list[float], list[list[dict[str, Any]]]]:
     """Reconstruct visual rows using word coordinates.
 
     PDF text extraction often splits a table row into several lines because
     of cell padding.  Grouping words by vertical position keeps descriptions
-    and their amounts together.
+    and their amounts together.  Each row's words are returned too, so table
+    cells can still be placed by the x position they were printed at.
     """
     try:
         words = page.extract_words(x_tolerance=2, y_tolerance=2, keep_blank_chars=False)
@@ -661,7 +740,8 @@ def extract_rows_from_page(page: Any) -> list[str]:
         words = []
     if not words:
         text = page.extract_text() or ""
-        return [line.strip() for line in text.splitlines() if line.strip()]
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return lines, [float(index) for index in range(len(lines))], [[] for _ in lines]
 
     groups: list[dict[str, Any]] = []
     for word in sorted(words, key=lambda item: (item.get("top", 0), item.get("x0", 0))):
@@ -677,12 +757,16 @@ def extract_rows_from_page(page: Any) -> list[str]:
             groups.append({"top": top, "words": [word]})
 
     rows = []
+    tops = []
+    words_rows = []
     for group in sorted(groups, key=lambda item: item["top"]):
         ordered = sorted(group["words"], key=lambda item: item.get("x0", 0))
         text = " ".join(str(item.get("text", "")) for item in ordered).strip()
         if text:
             rows.append(text)
-    return rows
+            tops.append(float(group["top"]))
+            words_rows.append(ordered)
+    return rows, tops, words_rows
 
 
 def page_text(page: Any) -> str:
@@ -692,32 +776,223 @@ def page_text(page: Any) -> str:
         return ""
 
 
-def season_key(label: str) -> str:
-    return re.sub(r"\s*season\b", "", label.strip().lower()).strip()
-
-
 def detect_residency(*parts: str) -> str:
     text = " ".join(part for part in parts if part).lower()
-    if re.search(r"\bnon[\s-]?resident\b|\binternational\b|\bforeign\b", text):
+    if re.search(r"\bnon[\s-]?residents?\b|\binternational\b|\bforeign\b", text):
         return "non-resident"
-    if re.search(r"\b(?:east african|e\.?\s*a\.?\s*)?resident\b|\bcitizen\b|\bksh?\b.*resident|\bresident.*\bksh?\b", text):
+    if re.search(r"\b(?:east african|e\.?\s*a\.?\s*)?residents?\b|\bcitizens?\b|\bksh?\b.*resident|\bresident.*\bksh?\b", text):
         return "resident"
     return "unknown"
 
 
-def order_season_labels(labels: list[str]) -> list[str]:
-    """Put known season labels in the conventional Peak→Green order.
+def header_season_columns(text: str) -> list[str]:
+    """Season headings in the order the contract prints them, left to right.
 
-    PDF headers are often split over two visual lines, so the label order we
-    collect can differ from the column order.  For the common season names a
-    fixed order is a reliable heuristic.
+    Contract tables are read column by column in print order, so the headings
+    must stay in that order — re-sorting them into a conventional
+    Peak→Low order is what used to price the wrong column.
     """
-    if len(set(label.lower() for label in labels)) != len(labels):
-        return labels
-    keys = [season_key(label) for label in labels]
-    if all(key in SEASON_ORDER for key in keys):
-        return [label for _, label in sorted(zip(keys, labels), key=lambda item: SEASON_ORDER[item[0]])]
-    return labels
+    matches = list(HEADER_SEASON_RE.finditer(text))
+    if not matches:
+        return []
+    leftover = re.sub(r"[^0-9A-Za-z]", " ", HEADER_SEASON_RE.sub(" ", text)).strip()
+    if re.search(r"\d", leftover):
+        return []
+    if len(matches) == 1:
+        # A heading on its own row is still a heading; wrapped tables put one
+        # label per row. Policy lines ("Low season: 30 days") keep words/digits
+        # in the leftover and are rejected above.
+        if leftover and not re.fullmatch(r"(?i)seasons?", leftover):
+            return []
+        return [matches[0].group(1)]
+    if len(leftover) > 24:
+        return []
+    return [match.group(1) for match in matches]
+
+
+def seasons_for_label(label: str) -> list[str]:
+    """Trade seasons a printed column heading covers ("Mid & Low" covers two)."""
+    text = str(label or "").lower()
+    seasons: list[str] = []
+    if re.search(r"mid|middle|shoulder|standard", text):
+        seasons.append("shoulder")
+    if re.search(r"peak|high|festive", text):
+        seasons.append("high")
+    if re.search(r"low|green", text):
+        seasons.append("low")
+    return seasons
+
+
+def months_in_text(text: str) -> set[str]:
+    months = {match.group(0).lower()[:3] for match in MONTH_RE.finditer(text)}
+    # Some contracts print bands as 3/1/2027 – 31/3/2027 instead of month names.
+    for match in NUMERIC_DATE_RE.finditer(text):
+        month = int(match.group(2))
+        if 1 <= month <= 12:
+            months.add(SEASON_MONTH_CODES[month - 1])
+    return months
+
+
+def season_for_months(months: set[str]) -> list[str]:
+    seasons = set()
+    for month in months:
+        if month in ("apr", "may"):
+            seasons.add("low")
+        elif month in ("dec", "jul", "aug", "sep", "oct"):
+            seasons.add("high")
+        else:
+            seasons.add("shoulder")
+    return [key for key in SEASON_ORDER if key in seasons]
+
+
+def season_from_dates(text: str) -> str:
+    """Kenya's trade seasons applied to one printed date band."""
+    seasons = season_for_months(months_in_text(text))
+    # One label for the whole band: the rains price the row, then the peak.
+    for key in ("low", "high", "shoulder"):
+        if key in seasons:
+            return key
+    return ""
+
+
+def band_seasons(text: str) -> list[str]:
+    """Every trade season one printed rate band covers.
+
+    Contracts price one row per band, and a band often spans two of our seasons:
+    Salt Lick's "High Season" runs 02 Jan–31 Mar as well as Jul–Jan, so a January
+    quote legitimately comes off that row.
+    """
+    seasons = set(season_for_months(months_in_text(text)))
+    for match in HEADER_SEASON_RE.finditer(text):
+        seasons.update(seasons_for_label(match.group(1)))
+    return [key for key in SEASON_ORDER if key in seasons]
+
+
+def row_season(text: str) -> str:
+    """Season declared on one rate row, for contracts with a season per row."""
+    seasons: set[str] = set()
+    for match in HEADER_SEASON_RE.finditer(text):
+        seasons.update(seasons_for_label(match.group(1)))
+    if len(seasons) == 1:
+        return next(iter(seasons))
+    if seasons:
+        return ""
+    return season_from_dates(text)
+
+
+def ordered_date_seasons(rows: list[str]) -> list[str]:
+    """Season per date band, in the order the contract prints the bands."""
+    seasons: list[str] = []
+    for row in rows:
+        for part in re.split(r"[;,/]| {2,}", row):
+            season = season_from_dates(part)
+            if season:
+                seasons.append(season)
+    return seasons
+
+
+def column_unit(label: str) -> str:
+    """What one table column is sold in ("DOUBLE" per room, "3rd adult" per person)."""
+    text = str(label or "").lower()
+    if re.search(r"child|infant", text):
+        return "per_child_night"
+    if re.search(r"3rd|third|extra bed", text):
+        return "per_extra_person_night"
+    if re.search(r"per\s+person|pppn|sharing", text):
+        return "per_person_night"
+    if re.search(r"\bsingle\b", text):
+        return "per_single_night"
+    if re.search(r"double|twin|family|suite|room|tent|cottage|triple|deluxe|superior|standard", text):
+        return "per_room_night"
+    return ""
+
+
+def header_columns_above(words_rows: list[list[dict[str, Any]]], index: int) -> list[dict[str, Any]]:
+    """Occupancy column headings above one rate row, keyed by x position."""
+    if not words_rows or index >= len(words_rows):
+        return []
+    row = words_rows[index]
+    if not row:
+        return []
+    limit = min(float(word.get("top", 0)) for word in row)
+    collected: list[dict[str, Any]] = []
+    for previous in range(index - 1, max(-1, index - 12), -1):
+        words = [word for word in words_rows[previous] if word]
+        if not words:
+            continue
+        baseline = max(float(word.get("top", 0)) for word in words)
+        if not re.search(r"[A-Za-z]", " ".join(str(word.get("text", "")) for word in words)):
+            # A wrapped date or a stray number on its own line.
+            limit = baseline
+            continue
+        if limit - baseline > 32:
+            break
+        found = [
+            word
+            for word in words
+            if OCCUPANCY_WORD_RE.search(str(word.get("text", "")))
+            and not DATE_TOKEN_RE.search(str(word.get("text", "")))
+        ]
+        if not found:
+            # Another priced row, or a short meal-plan marker ("FB"), can sit
+            # between the headings and this row.
+            text = " ".join(str(word.get("text", "")) for word in words)
+            if amount_cells(words) or len(text) <= 12:
+                limit = baseline
+                continue
+            break
+        collected.extend(found)
+        limit = baseline
+    columns: list[dict[str, Any]] = []
+    for word in sorted(collected, key=lambda item: (float(item.get("x0", 0)), float(item.get("top", 0)))):
+        x = float(word.get("x0", 0))
+        text = str(word.get("text", "")).strip(" .,;:")
+        if not text:
+            continue
+        if columns and abs(columns[-1]["x"] - x) <= 12:
+            columns[-1]["text"] = f"{columns[-1]['text']} {text}".strip()
+        else:
+            columns.append({"x": x, "text": text})
+    return columns
+
+
+def amount_cells(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Bare rate cells on one row with the x position they were printed at."""
+    cells: list[dict[str, Any]] = []
+    for word in sorted(words, key=lambda item: float(item.get("x0", 0))):
+        text = str(word.get("text", "")).strip()
+        if not text or "%" in text or not re.fullmatch(r"\d[\d,]*(?:\.\d{1,2})?", text):
+            continue
+        if DATE_TOKEN_RE.fullmatch(text):
+            continue
+        value = normalize_number(text)
+        if value < 5 or value > 1_000_000:
+            continue
+        if 2024 <= value <= 2035 and float(value).is_integer():
+            continue
+        cells.append({"value": value, "x": float(word.get("x0", 0))})
+    return cells
+
+
+def match_amounts_to_columns(cells: list[dict[str, Any]], columns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Pair each printed rate with the occupancy column printed above it."""
+    if not cells or not columns:
+        return []
+    matched = []
+    for cell in cells:
+        column = min(columns, key=lambda item: abs(float(item["x"]) - cell["x"]))
+        if abs(float(column["x"]) - cell["x"]) > 40:
+            return []
+        unit = column_unit(column["text"])
+        if not unit:
+            return []
+        matched.append({"value": cell["value"], "label": column["text"], "unit": unit})
+    return matched
+
+
+def format_season_label(label: str) -> str:
+    text = re.sub(r"\s+", " ", str(label or "")).strip()
+    return text[:1].upper() + text[1:].lower() if text else ""
 
 
 def is_season_only(text: str) -> bool:
@@ -755,34 +1030,115 @@ def looks_like_section(text: str, amounts: list[float], labels: list[str]) -> bo
     return text.isupper() or 2 <= len(words) <= 3
 
 
-def build_candidates(rows: list[str], page_number: int, page_default_currency: str) -> list[dict[str, Any]]:
+def build_candidates(
+    rows: list[str],
+    page_number: int,
+    page_default_currency: str,
+    tops: list[float] | None = None,
+    header_blocks: list[dict[str, Any]] | None = None,
+    words_rows: list[list[dict[str, Any]]] | None = None,
+) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
-    season_labels: list[str] = []
+    season_columns: list[str] = []
+    header_fee = False
+    header_open = False
     date_context: list[str] = []
     section_context = ""
     label_context = ""
+    table_title = ""
+    table_title_index = -99
+    residency_context = ""
 
     for index, line in enumerate(rows):
         stripped = line.strip()
         if not stripped:
             continue
+        row_top = tops[index] if tops and index < len(tops) else None
 
         amounts, line_currency, has_currency = amounts_from_line(stripped)
         labels = season_labels_from_text(stripped)
+
+        # Season-per-row tables price each printed band on its own row, and their
+        # columns are occupancies ("SINGLE DOUBLE THIRD BED", "Per Person in twin").
+        # Place every amount under the heading printed above its x position.
+        band_matches: list[dict[str, Any]] = []
+        band_span: list[str] = []
+        row_band = ""
+        row_words = words_rows[index] if words_rows and index < len(words_rows) else []
+        if amounts and row_words and BAND_LEAD_RE.match(stripped):
+            cells = amount_cells(row_words)
+            matched = match_amounts_to_columns(cells, header_columns_above(words_rows, index))
+            if matched:
+                band = " ".join(
+                    str(word.get("text", ""))
+                    for word in sorted(row_words, key=lambda item: float(item.get("x0", 0)))
+                    if float(word.get("x0", 0)) < cells[0]["x"]
+                )[:120]
+                band_span = band_seasons(band)
+                if band_span:
+                    row_band, band_matches = band, matched
+
+        if band_matches:
+            # Each column can be sold differently, so only claim one unit when they agree.
+            band_units = {item["unit"] for item in band_matches}
+            first_unit = band_matches[0]["unit"] if len(band_units) == 1 else ""
+            # Keep the room or property the table is for ("PARK VIEW ROOMS"), so four
+            # prices in one band are not all described as the same room.
+            title = table_title if index - table_title_index <= 10 else ""
+            residency = detect_residency(row_band, stripped)
+            if residency == "unknown":
+                residency = residency_context or "unknown"
+            candidates.append(
+                {
+                    "id": f"cand-{page_number}-{index}-{hashlib.sha1(stripped.encode('utf-8')).hexdigest()[:6]}",
+                    "page": page_number,
+                    "raw": stripped,
+                    "description": clean_description(
+                        " — ".join(part for part in (title, row_band) if part), []
+                    ),
+                    "amounts": [item["value"] for item in band_matches],
+                    "amountLabels": [item["label"] for item in band_matches],
+                    "amountSeasons": [band_span for _ in band_matches],
+                    "amountColumns": [item["label"] for item in band_matches],
+                    "amountUnits": [item["unit"] for item in band_matches],
+                    "seasonSource": "row",
+                    "currency": line_currency or page_default_currency or "USD",
+                    "unit": first_unit,
+                    "unitLabel": UNIT_LABELS.get(first_unit, first_unit) if first_unit else "Per printed column",
+                    "seasonHint": row_band,
+                    "confidence": "medium" if page_default_currency else "low",
+                    "residency": residency,
+                }
+            )
+            continue
+
+        # Column headings are collected in print order. A separate "conservancy
+        # fees" heading means the last amount column is a fee, not a season.
+        header_columns = header_season_columns(stripped) if not amounts else []
+        if header_columns:
+            # Prefer the headings' x positions: that is the order the table prints
+            # its columns in. Without coordinates, a wrapped header adds its
+            # remaining headings one row at a time.
+            placed = merge_header_blocks(header_blocks or [], row_top)
+            if placed:
+                if not season_columns or len(placed) >= len(season_columns):
+                    season_columns = placed
+                    header_open = False
+            elif header_open and len(header_columns) == 1:
+                season_columns += [item for item in header_columns if item not in season_columns]
+            else:
+                season_columns = list(header_columns)
+                header_open = True
+            header_fee = bool(FEE_WORD_RE.search(stripped))
+        elif not amounts and season_columns and len(stripped) < 60 and FEE_WORD_RE.search(stripped):
+            header_fee = True
+        if amounts:
+            header_open = False
 
         # A label ending in a colon (e.g. "Executive Suite Supplement:")
         # describes the rate row that follows it.
         if not amounts and stripped.endswith(":") and 3 <= len(stripped) <= 100:
             label_context = stripped.rstrip(":")
-
-        # Season headers are frequently split across two rows.  Accumulate
-        # them until a rate row arrives.
-        if labels and not amounts:
-            if len(labels) >= 2:
-                season_labels = labels
-            elif re.search(r"season|festive", stripped, re.I):
-                if labels[0].lower() not in [label.lower() for label in season_labels]:
-                    season_labels = (season_labels + labels)[-4:]
 
         if (
             MONTH_RE.search(stripped)
@@ -796,6 +1152,22 @@ def build_candidates(rows: list[str], page_number: int, page_default_currency: s
         if looks_like_section(stripped, amounts, labels):
             section_context = stripped
             label_context = ""
+
+        if not amounts:
+            if len(stripped) <= 100 and re.search(
+                r"(?i)contract|agreement|rates|tariff", stripped
+            ) and re.search(r"(?i)\b(?:non[-\s]?)?residents?\b", stripped):
+                residency_context = detect_residency(stripped)
+            # A table's title names the property or room it prices. Wrapped column
+            # headings ("Plan Person in … room", "Suite") are not titles.
+            if (
+                len(stripped) <= 80
+                and len(stripped.split()) >= 2
+                and re.search(r"(?i)rooms?\b|suites?\b|lodge|camp\b|resort|villa|cottage|tent\b|banda|chalet", stripped)
+                and not re.search(r"(?i)\b(?:per|person|plan|adult|sharing|child|meal)\b", stripped)
+            ):
+                table_title = stripped.rstrip(":")
+                table_title_index = index
 
         if len(stripped) < 5 or SKIP_LINE_RE.search(stripped):
             continue
@@ -859,7 +1231,13 @@ def build_candidates(rows: list[str], page_number: int, page_default_currency: s
             label_context = ""
 
         nearby = " ".join(rows[max(0, index - 1): min(len(rows), index + 3)])
-        unit = unit_from_text(stripped) or unit_from_text(next_row) or unit_from_text(nearby)
+        unit = (
+            unit_from_text(stripped)
+            or unit_from_text(next_row)
+            or unit_from_text(nearby)
+            or unit_from_text(section_context)
+            or unit_from_text(label_context)
+        )
         if not unit:
             if re.search(r"\b(?:sharing|single|suite|tent|room|villa|cabin)\b", description, re.I):
                 unit = "per_person_night" if re.search(r"\b(?:night|per person)\b", nearby, re.I) else "per_person"
@@ -869,16 +1247,61 @@ def build_candidates(rows: list[str], page_number: int, page_default_currency: s
                 unit = "per_person"
 
         amount_labels: list[str] = []
-        if len(amounts) > 1 and len(season_labels) == len(amounts):
-            amount_labels = order_season_labels(list(season_labels))
-        elif len(amounts) > 1:
-            amount_labels = [f"Option {n + 1}" for n in range(len(amounts))]
+        amount_seasons: list[list[str]] = []
+        amount_columns: list[str] = []
+        season_source = "none"
+        single = ""
+        if len(amounts) > 1:
+            columns = list(season_columns)
+            if columns and header_fee and len(columns) == len(amounts) - 1:
+                columns.append("Conservancy fees")
+            if len(columns) > len(amounts):
+                columns = columns[: len(amounts)]
+            if len(columns) == len(amounts):
+                season_source = "header"
+            else:
+                # No readable headings: fall back to the printed date bands, still
+                # in the order they appear on the contract.
+                dated = ordered_date_seasons(date_context)
+                if dated and header_fee and len(dated) == len(amounts) - 1:
+                    dated.append("")
+                if len(dated) == len(amounts):
+                    columns = [format_season_label(item) if item else "" for item in dated]
+                    season_source = "dates"
+                else:
+                    columns = []
+            if not columns:
+                # Season-per-row tables: one heading prices every amount on the row.
+                single = row_season(stripped)
+                if single:
+                    columns = [""] * len(amounts)
+                    season_source = "row"
+                    amount_seasons = [[single] for _ in amounts]
+            for index in range(len(amounts)):
+                label = columns[index] if index < len(columns) else ""
+                if label and FEE_WORD_RE.search(label):
+                    label = "Conservancy fees"
+                    seasons: list[str] = []
+                elif label:
+                    seasons = seasons_for_label(label)
+                else:
+                    seasons = []
+                display = format_season_label(label) if label else f"Column {index + 1}"
+                amount_labels.append(display)
+                if season_source == "row":
+                    amount_seasons.append([single])
+                else:
+                    amount_seasons.append(seasons)
+                amount_columns.append(f"{display} (column {index + 1})")
+        elif len(amounts) == 1:
+            amount_seasons = [[]]
+            amount_columns = ["Column 1"]
 
         hint_parts = []
         if amount_labels:
             hint_parts.extend(amount_labels)
-        elif season_labels:
-            hint_parts.append(", ".join(order_season_labels(season_labels)))
+        elif season_columns:
+            hint_parts.append(", ".join(season_columns))
         if date_context:
             hint_parts.append(" / ".join(date_context))
         season_hint = " · ".join(part for part in hint_parts if part)[:240]
@@ -899,6 +1322,9 @@ def build_candidates(rows: list[str], page_number: int, page_default_currency: s
                 "description": description,
                 "amounts": amounts,
                 "amountLabels": amount_labels,
+                "amountSeasons": amount_seasons,
+                "amountColumns": amount_columns,
+                "seasonSource": season_source,
                 "currency": currency,
                 "unit": unit,
                 "unitLabel": UNIT_LABELS.get(unit, unit),
@@ -940,8 +1366,15 @@ def extract_pdf(file_path: Path, meta: dict[str, Any]) -> dict[str, Any]:
             if len(text.strip()) < 20:
                 scanned_pages += 1
             default_currency = currency_from_text(text) or "USD"
-            rows = extract_rows_from_page(page)
-            candidates = build_candidates(rows, index + 1, default_currency)
+            rows, tops, words_rows = extract_rows_from_page(page)
+            candidates = build_candidates(
+                rows,
+                index + 1,
+                default_currency,
+                tops=tops,
+                header_blocks=season_header_blocks(page),
+                words_rows=words_rows,
+            )
             all_candidates.extend(candidates)
             pages_out.append(
                 {
@@ -1046,7 +1479,15 @@ def extract_file(inventory: dict[str, Any], path: str) -> dict[str, Any]:
     ext = (meta.get("ext") or "").lower()
 
     cache_key = hashlib.sha1(
-        (path + "|" + str(meta.get("size") or "") + "|" + str(meta.get("modified") or "")).encode("utf-8")
+        (
+            EXTRACTION_VERSION
+            + "|"
+            + path
+            + "|"
+            + str(meta.get("size") or "")
+            + "|"
+            + str(meta.get("modified") or "")
+        ).encode("utf-8")
     ).hexdigest()
     extraction_cache = CACHE_DIR / f"extract-{cache_key}.json"
     if extraction_cache.exists():
@@ -1072,6 +1513,75 @@ def extract_file(inventory: dict[str, Any], path: str) -> dict[str, Any]:
     except Exception:
         pass
     return result
+
+
+# ---------------------------------------------------------------------------
+# Condensed rates for the budget planner
+# ---------------------------------------------------------------------------
+
+MAX_RATE_ITEMS = 24
+MAX_RATE_PATHS = 2
+MAX_RATE_CANDIDATES = 160
+
+
+def summarize_rates(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep only what a rate list needs: amounts, labels and validity."""
+    rows: list[dict[str, Any]] = []
+    for candidate in result.get("candidates") or []:
+        amounts = candidate.get("amounts") or []
+        if not amounts:
+            continue
+        rows.append(
+            {
+                "description": candidate.get("description") or "",
+                "amounts": amounts,
+                "amountLabels": candidate.get("amountLabels") or [],
+                "amountSeasons": candidate.get("amountSeasons") or [],
+                "amountColumns": candidate.get("amountColumns") or [],
+                "amountUnits": candidate.get("amountUnits") or [],
+                "seasonSource": candidate.get("seasonSource") or "none",
+                "currency": candidate.get("currency") or "",
+                "unit": candidate.get("unit") or "",
+                "unitLabel": candidate.get("unitLabel") or "",
+                "seasonHint": candidate.get("seasonHint") or "",
+                "residency": candidate.get("residency") or "unknown",
+                "page": candidate.get("page") or 0,
+            }
+        )
+        if len(rows) >= MAX_RATE_CANDIDATES:
+            break
+    return rows
+
+
+def rates_for_item(inventory: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    paths = [path for path in (item.get("paths") or []) if isinstance(path, str)][:MAX_RATE_PATHS]
+    files: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for path in paths:
+        if not validate_file_path(inventory, path):
+            errors.append("That file is not in the synced contract library.")
+            continue
+        try:
+            result = extract_file(inventory, path)
+        except Exception as exc:  # a single bad contract should not fail the batch
+            errors.append(str(exc))
+            continue
+        meta = result.get("file") or {}
+        files.append(
+            {
+                "name": meta.get("name") or Path(path).name,
+                "path": path,
+                "candidates": summarize_rates(result),
+                "notes": result.get("notes") or "",
+            }
+        )
+    return {
+        "key": str(item.get("key") or ""),
+        "name": str(item.get("name") or ""),
+        "location": str(item.get("location") or ""),
+        "files": files,
+        "errors": errors,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1159,6 +1669,18 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 result = extract_file(inventory, file_path)
                 json_response(self, 200, {"ok": True, **result})
+                return
+
+            if path == "/api/rates":
+                body = read_json_body(self)
+                items = body.get("items")
+                if not isinstance(items, list) or not items:
+                    raise ValueError("Send at least one item to read rates for.")
+                clean_items = [item for item in items if isinstance(item, dict)][:MAX_RATE_ITEMS]
+                inventory = load_inventory()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                    results = list(pool.map(lambda item: rates_for_item(inventory, item), clean_items))
+                json_response(self, 200, {"ok": True, "items": results})
                 return
 
             error_response(self, 404, "Unknown API endpoint.")

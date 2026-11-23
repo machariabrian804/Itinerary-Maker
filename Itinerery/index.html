@@ -134,38 +134,87 @@
             <section class="panel planner-panel" id="plannerPanel">
               <div class="panel-head">
                 <div>
-                  <p class="eyebrow">Trip planner</p>
-                  <h2>Where are you going?</h2>
+                  <p class="eyebrow">Itinerary framework</p>
+                  <h2>Where are the clients going?</h2>
                 </div>
                 <div class="planner-summary">
-                  <span class="planner-pill"><strong id="plannerDays">1</strong> day<span id="plannerDaysPlural">s</span></span>
-                  <span class="planner-pill"><strong id="plannerNights">1</strong> night<span id="plannerNightsPlural">s</span></span>
+                  <span class="planner-pill"><strong id="plannerDays">1</strong> <span>day<span id="plannerDaysPlural">s</span></span></span>
+                  <span class="planner-pill"><strong id="plannerNights">1</strong> <span>night<span id="plannerNightsPlural">s</span></span></span>
                 </div>
               </div>
 
-              <div class="form-grid planner-grid">
-                <label class="field">
-                  <span>Number of days</span>
-                  <input id="tripDays" type="number" min="1" step="1" inputmode="numeric">
-                </label>
-                <label class="field">
-                  <span>Guest type</span>
-                  <select id="residency">
-                    <option value="non-resident">Non-resident</option>
-                    <option value="resident">Resident</option>
-                  </select>
-                </label>
-                <div class="field span-2 planner-hint">
-                  <span>How it works</span>
-                  <p>Add each location and how many nights you’ll stay. We’ll suggest hotels/contracts from the OneDrive library for that location and guest type.</p>
+              <div class="budget-planner framework-planner" id="frameworkPlanner">
+                <div class="budget-head">
+                  <div>
+                    <span class="stops-label">Itinerary framework · agency tool</span>
+                    <p class="muted small">Start with the nights, the season, the areas the clients want and the market tier. The framework places the nights where they belong, prices each stay in that season and shows every room category. Your markup is applied afterwards.</p>
+                  </div>
+                  <div class="plan-badges">
+                    <span class="planner-pill"><strong id="frameworkNightPill">—</strong> nights</span>
+                    <span class="planner-pill"><strong id="frameworkAreaPill">—</strong> areas</span>
+                  </div>
+                </div>
+                <div class="framework-controls">
+                  <label class="field">
+                    <span>Nights</span>
+                    <input id="frameworkDays" type="number" min="1" max="30" step="1" inputmode="numeric">
+                  </label>
+                  <label class="field">
+                    <span>Season</span>
+                    <select id="frameworkSeason">
+                      <option value="" selected>Any season</option>
+                      <option value="high">High season</option>
+                      <option value="shoulder">Shoulder season</option>
+                      <option value="low">Low season</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>Market tier</span>
+                    <select id="frameworkTier">
+                      <option value="budget">Budget</option>
+                      <option value="midrange" selected>Mid-range</option>
+                      <option value="luxury">Luxury</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>Guest type</span>
+                    <select id="residency">
+                      <option value="non-resident">Non-resident</option>
+                      <option value="resident">Resident</option>
+                    </select>
+                  </label>
+                  <label class="field framework-cap">
+                    <span>Budget cap (optional)</span>
+                    <span class="input-prefix">
+                      <span class="prefix-code" id="frameworkCurrencyLabel">USD</span>
+                      <input id="frameworkBudget" type="number" min="0" step="50" inputmode="decimal" placeholder="none">
+                    </span>
+                  </label>
+                  <button class="btn btn-primary budget-build" id="frameworkBuildBtn" type="button">Build framework</button>
+                </div>
+                <div class="framework-areas">
+                  <div class="framework-areas-head">
+                    <span class="stops-label">Areas the clients want</span>
+                    <button class="btn btn-quiet btn-small" id="frameworkSuggestBtn" type="button">Suggest for these nights</button>
+                  </div>
+                  <div class="area-chips" id="frameworkAreaChips"></div>
+                  <p class="muted small" id="frameworkAreaHint"></p>
+                </div>
+                <div class="budget-status hidden" id="frameworkStatus">
+                  <span class="spinner" aria-hidden="true"></span>
+                  <span id="frameworkStatusText">Reading contract rates…</span>
+                </div>
+                <div class="budget-result hidden" id="frameworkResult"></div>
+
+                <div class="framework-stops">
+                  <div class="stops-head">
+                    <span class="stops-label">Places visited</span>
+                    <button class="btn btn-quiet btn-small" id="addStopBtn" type="button">Add stop</button>
+                  </div>
+                  <p class="muted small">The itinerary in visiting order. Build the framework above, apply it, then refine the nights here before you quote.</p>
+                  <div class="stops-list" id="stopsList"></div>
                 </div>
               </div>
-
-              <div class="stops-head">
-                <span class="stops-label">Stops</span>
-                <button class="btn btn-quiet btn-small" id="addStopBtn" type="button">Add stop</button>
-              </div>
-              <div class="stops-list" id="stopsList"></div>
 
               <div class="hotel-matches" id="hotelMatches">
                 <div class="hotel-matches-head">
@@ -286,6 +335,9 @@
               <select id="rateExtFilter" class="select-small">
                 <option value="all">All files</option>
                 <option value="extractable">PDF &amp; Excel only</option>
+              </select>
+              <select id="rateLocationFilter" class="select-small" title="Show hotels for one location">
+                <option value="all">All locations</option>
               </select>
             </div>
             <div class="supplier-list" id="supplierList"></div>
