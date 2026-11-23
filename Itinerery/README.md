@@ -33,7 +33,8 @@ rate library, file previews and extraction need the local server.
 2. **Itinerary framework** — the agency planning aid, and the only place an itinerary is
    built: the **Places visited** list sits inside this panel, under the framework it fills.
    Enter the nights, the **Season** (any, high, shoulder or low), pick the areas the
-   clients want (or let **Suggest for these nights** choose a circuit) and the market tier
+   clients want (or let **Suggest for these nights** choose a circuit — it also fills the
+   **Places visited** list with that circuit and its nights) and the market tier
    — **Budget**, **Mid-range** or **Luxury**. **Build framework** places the nights where
    they belong: the Mara gets 3 (min 2, max 4), Amboseli 2, Naivasha, Nakuru and Nairobi 1,
    and the areas are ordered along a real circuit that avoids backtracking: Nairobi, then
@@ -92,6 +93,7 @@ rate library, file previews and extraction need the local server.
    the quote with one click. Review the candidates against the PDF; contract layouts
    vary a lot, so extraction is a shortcut, not an authority.
 5. **Print / PDF** — produces a clean client-facing quotation with company details,
+   the places visited in visiting order (day range and nights for each stop), the
    itinerary lines, net/markup/total, per-person total and notes. Use the browser’s
    “Save as PDF” option for a PDF.
 6. **Sync** — refreshes the supplier/file list from the public OneDrive share. It does

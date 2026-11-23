@@ -2540,6 +2540,22 @@ function renderSummary() {
     .join('');
 }
 
+// Stops in visiting order, each with the day range its nights cover.
+function stopTimeline(quote) {
+  let day = 1;
+  return (quote.stops || []).map((stop) => {
+    const nights = Math.max(1, Math.round(num(stop.nights, 1)));
+    const item = {
+      location: String(stop.location || '').trim(),
+      nights,
+      from: day,
+      to: day + nights - 1,
+    };
+    day += nights;
+    return item;
+  });
+}
+
 function renderPrintDoc() {
   const quote = activeQuote();
   const total = computeQuote(quote);
@@ -2549,6 +2565,24 @@ function renderPrintDoc() {
   const prepared = company.preparedBy ? `Prepared by ${company.preparedBy}` : '';
   const today = fmtDate(nowIso().slice(0, 10));
   const quoteTitle = quote.name || 'Safari itinerary';
+
+  const timeline = stopTimeline(quote).filter((stop) => stop.location);
+  const itinerary = timeline.length
+    ? `<section class="print-itinerary">
+        <h3>Places visited</h3>
+        <ol>${timeline
+          .map(
+            (stop) => `<li>
+              <span class="print-day">${
+                stop.from === stop.to ? `Day ${stop.from}` : `Days ${stop.from}–${stop.to}`
+              }</span>
+              <strong>${escapeHtml(stop.location)}</strong>
+              <span class="print-nights">${stop.nights} night${stop.nights === 1 ? '' : 's'}</span>
+            </li>`
+          )
+          .join('')}</ol>
+      </section>`
+    : '';
 
   const rows = total.rows.length
     ? total.rows
@@ -2598,6 +2632,8 @@ function renderPrintDoc() {
         <div><span>Travel dates</span><strong>${escapeHtml(datesLabel(quote))}</strong></div>
         <div><span>Party</span><strong>${escapeHtml(partyLabel(quote))}</strong></div>
       </section>
+
+      ${itinerary}
 
       <table class="print-table">
         <thead>
@@ -3969,8 +4005,22 @@ function bindEvents() {
   });
   dom.frameworkSuggestBtn.addEventListener('click', () => {
     const days = clamp(Math.round(num(dom.frameworkDays.value, 1)), 1, 30);
-    frameworkState.areas = new Set(suggestAreas(days));
+    const allocation = allocateNights(days, suggestAreas(days));
+    frameworkState.areas = new Set(allocation.stays.map((stay) => stay.key));
     populateAreaChips();
+
+    // The suggestion is an itinerary, not just a set of areas: write the circuit and
+    // its nights into Places visited so the client itinerary reads in visiting order.
+    const quote = activeQuote();
+    const typed = (quote.stops || []).some((stop) => String(stop.location || '').trim());
+    if (typed && !confirm('Replace the places visited with the suggested circuit?')) return;
+    quote.stops = allocation.stays.map((stay) => createStop(stay.label, stay.nights));
+    quote.tripDays = allocation.stays.reduce((sum, stay) => sum + stay.nights, 0);
+    activeStopId = quote.stops.length ? quote.stops[0].id : null;
+    touchQuote(quote);
+    renderPlanner();
+    saveState();
+    toast(`Suggested circuit: ${allocation.stays.map((stay) => `${stay.label} (${stay.nights})`).join(' → ')}`);
   });
   dom.frameworkAreaChips.addEventListener('click', (event) => {
     const chip = event.target.closest('[data-area]');

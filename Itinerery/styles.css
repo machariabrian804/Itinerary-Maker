@@ -3171,6 +3171,52 @@ body.modal-open {
     font-weight: 600;
   }
 
+  .print-itinerary {
+    margin-top: 16px;
+  }
+
+  .print-itinerary h3 {
+    color: #173b2d;
+    font-size: 7.5pt;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  .print-itinerary ol {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 10px;
+    margin-top: 7px;
+    padding: 0;
+    list-style: none;
+  }
+
+  .print-itinerary li {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    padding: 5px 10px;
+    border: 1px solid #ddd5c7;
+    border-radius: 4px;
+  }
+
+  .print-itinerary .print-day {
+    color: #8a8478;
+    font-size: 7.5pt;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .print-itinerary strong {
+    font-size: 9.5pt;
+  }
+
+  .print-itinerary .print-nights {
+    color: #7c766b;
+    font-size: 8pt;
+  }
+
   .print-table {
     width: 100%;
     margin-top: 16px;
